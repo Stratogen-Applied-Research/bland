@@ -1,0 +1,278 @@
+# BLAND — Showcase
+
+```elixir
+Mix.install([
+  {:bland, path: Path.expand("..", __DIR__)},
+  {:kino, "~> 0.14"}
+])
+```
+
+## 1. Hello, technical drawing
+
+The simplest plot — a single curve with axis labels and a legend. Note
+the serif typography, dashed grid, framed plot area, and ALL-CAPS title
+with letter spacing. These are the defaults of the `:report_1972` theme.
+
+```elixir
+xs = Enum.map(0..100, &(&1 / 10.0))
+
+Bland.figure(size: :a5_landscape, title: "Figure 1 — sin(x)")
+|> Bland.axes(xlabel: "x [rad]", ylabel: "sin(x)", xlim: {0, 10})
+|> Bland.line(xs, Enum.map(xs, &:math.sin/1), label: "y = sin(x)")
+|> Bland.legend(position: :top_right)
+|> Bland.to_kino()
+```
+
+## 2. Multiple series, distinguishable without color
+
+Two curves plus an envelope. BLAND cycles through a dash-preset list so
+each line is visually distinct even when photocopied.
+
+```elixir
+decay = fn t -> :math.exp(-t / 4) end
+
+Bland.figure(size: :a5_landscape, title: "Figure 2 — Damped oscillation")
+|> Bland.axes(xlabel: "t [s]", ylabel: "x(t)", ylim: {-1.1, 1.1})
+|> Bland.line(xs, Enum.map(xs, &(decay.(&1) * :math.cos(&1))), label: "signal")
+|> Bland.line(xs, Enum.map(xs, &decay.(&1)), label: "envelope", stroke: :dashed)
+|> Bland.line(xs, Enum.map(xs, &(-decay.(&1))), stroke: :dashed)
+|> Bland.hline(0.0, stroke: :dotted)
+|> Bland.legend(position: :top_right)
+|> Bland.to_kino()
+```
+
+## 3. Scatter + area with hatching
+
+Synthetic noisy observations against a hatched envelope. The area fill
+uses BLAND's `:diagonal` pattern — solid in print, readable in a
+grayscale photocopy.
+
+```elixir
+:rand.seed(:exsss, {1, 2, 3})
+
+noisy = Enum.map(xs, fn x ->
+  :math.sin(x) + (:rand.uniform() - 0.5) * 0.3
+end)
+
+other = Enum.map(xs, fn x ->
+  :math.cos(x) / 2 + (:rand.uniform() - 0.5) * 0.2
+end)
+
+Bland.figure(size: :a5_landscape, title: "Figure 3 — Noisy observations")
+|> Bland.axes(xlabel: "x", ylabel: "y", ylim: {-1.5, 1.5})
+|> Bland.area(xs, Enum.map(xs, &:math.sin/1),
+     baseline: 0.0, label: "sin(x) envelope", hatch: :diagonal)
+|> Bland.scatter(xs, noisy, label: "measurement A", marker: :circle_open)
+|> Bland.scatter(xs, other, label: "measurement B", marker: :cross)
+|> Bland.line(xs, Enum.map(xs, &:math.sin/1), stroke: :solid)
+|> Bland.line(xs, Enum.map(xs, &(:math.cos(&1) / 2)), stroke: :dashed)
+|> Bland.legend(position: :top_right, title: "Series")
+|> Bland.to_kino()
+```
+
+## 4. Grouped bars with hatch variety
+
+Three runs across six months. Distinct hatches are clearly
+distinguishable without any color cue.
+
+```elixir
+cats = ["Jan", "Feb", "Mar", "Apr", "May", "Jun"]
+
+Bland.figure(size: :a5_landscape, title: "Figure 4 — Monthly throughput")
+|> Bland.axes(xlabel: "month", ylabel: "units / kcycle")
+|> Bland.bar(cats, [12, 18, 15, 22, 19, 25], label: "run A",
+     hatch: :diagonal, group: :a)
+|> Bland.bar(cats, [ 9, 14, 18, 19, 22, 28], label: "run B",
+     hatch: :crosshatch, group: :b)
+|> Bland.bar(cats, [10, 11, 13, 17, 20, 22], label: "run C",
+     hatch: :dots_sparse, group: :c)
+|> Bland.legend(position: :top_left)
+|> Bland.to_kino()
+```
+
+## 4b. Histograms
+
+Raw observations go in, binned bars come out. `:bins` accepts an
+integer count or one of `:sturges` (default), `:sqrt`, `:scott`,
+`:freedman_diaconis`. Bars are flush — no category gap.
+
+```elixir
+# 5000 samples from an approximately normal distribution via CLT
+:rand.seed(:exsss, {42, 17, 99})
+
+gaussianish = fn ->
+  Enum.reduce(1..12, 0.0, fn _, acc -> acc + :rand.uniform() end) - 6.0
+end
+
+samples = Enum.map(1..5000, fn _ -> gaussianish.() end)
+
+Bland.figure(size: :a5_landscape, title: "Figure 4b — Sample distribution")
+|> Bland.axes(xlabel: "x", ylabel: "count")
+|> Bland.histogram(samples, bins: 40, label: "n = 5000", hatch: :diagonal)
+|> Bland.legend(position: :top_right)
+|> Bland.to_kino()
+```
+
+Two distributions on shared bin edges, for apples-to-apples comparison:
+
+```elixir
+a = Enum.map(1..2000, fn _ -> gaussianish.() - 1.0 end)
+b = Enum.map(1..2000, fn _ -> gaussianish.() + 1.0 end)
+
+shared_edges = Enum.map(-80..80, &(&1 / 20.0))  # -4 to 4, step 0.05
+
+Bland.figure(size: :a5_landscape, title: "Two populations")
+|> Bland.axes(xlabel: "x", ylabel: "density")
+|> Bland.histogram(a, bin_edges: shared_edges, density: true,
+     label: "population A", hatch: :solid_white)
+|> Bland.histogram(b, bin_edges: shared_edges, density: true,
+     label: "population B", hatch: :diagonal_dense)
+|> Bland.legend(position: :top_right)
+|> Bland.to_kino()
+```
+
+## 5. Pattern gallery
+
+Every preset pattern rendered side-by-side. All bars share the same
+group, so each one fills its category slot — a clean swatch board.
+
+```elixir
+presets = Bland.Patterns.preset_cycle()
+names = Enum.map(presets, &Atom.to_string/1)
+
+fig =
+  Bland.figure(size: :a4_landscape, title: "Figure 5 — Pattern presets")
+  |> Bland.axes(grid: :none, ylim: {0, 1.2})
+
+# One bar per category, sharing :default group so each slot fills fully.
+presets
+|> Enum.with_index()
+|> Enum.reduce(fig, fn {p, i}, acc ->
+  cat = Enum.at(names, i)
+  Bland.bar(acc, [cat], [1.0], hatch: p)
+end)
+|> Bland.to_kino()
+```
+
+## 6. Log axis
+
+Logarithmic y-axis for multi-decade data. Tick placement auto-selects
+powers of 10.
+
+```elixir
+xs2 = Enum.map(1..40, &(&1 * 1.0))
+
+Bland.figure(size: :a5_landscape, title: "Figure 6 — Exponential growth")
+|> Bland.axes(xlabel: "n", ylabel: "cycles [log]", yscale: :log,
+            ylim: {1.0, 100_000.0})
+|> Bland.line(xs2, Enum.map(xs2, &:math.pow(2, &1 / 3)), label: "2ⁿ/³")
+|> Bland.line(xs2, Enum.map(xs2, &:math.pow(3, &1 / 4)), label: "3ⁿ/⁴",
+     stroke: :dashed)
+|> Bland.legend(position: :bottom_right)
+|> Bland.to_kino()
+```
+
+## 7. Annotations
+
+In-data text and arrows, positioned in the series' own coordinate
+system.
+
+```elixir
+Bland.figure(size: :a5_landscape, title: "Figure 7 — Peak analysis")
+|> Bland.axes(xlabel: "t [s]", ylabel: "x(t)")
+|> Bland.line(xs, Enum.map(xs, &(:math.exp(-&1 / 4) * :math.cos(&1))),
+     label: "response")
+|> Bland.annotate(text: "PEAK", at: {0.1, 0.95}, anchor: "start")
+|> Bland.annotate(arrow: {{0.8, 0.85}, {0.15, 0.98}})
+|> Bland.annotate(text: "first zero-crossing", at: {1.6, -0.08})
+|> Bland.vline(:math.pi() / 2, stroke: :dotted)
+|> Bland.legend(position: :top_right)
+|> Bland.to_kino()
+```
+
+## 8. Engineering title block
+
+The full drafting ornament — project, drawn-by, checked-by, date,
+scale, sheet, revision. The bottom margin auto-expands to make room.
+
+```elixir
+Bland.figure(size: :a4_landscape, title: "Figure 8 — Full drawing")
+|> Bland.axes(xlabel: "t [s]", ylabel: "amplitude", ylim: {-1.1, 1.1})
+|> Bland.line(xs, Enum.map(xs, &(:math.exp(-&1 / 4) * :math.cos(&1))),
+     label: "signal")
+|> Bland.line(xs, Enum.map(xs, &(:math.exp(-&1 / 4))),
+     label: "envelope", stroke: :dashed)
+|> Bland.hline(0.0, stroke: :dotted)
+|> Bland.legend(position: :top_right)
+|> Bland.title_block(
+     project:    "Project BLAND",
+     title:      "Damped oscillation response",
+     drawn_by:   "J. Doe",
+     checked_by: "R. Koss",
+     date:       "1974-03-21",
+     scale:      "1:1",
+     sheet:      "3 of 9",
+     rev:        "B"
+   )
+|> Bland.to_kino()
+```
+
+## 9. Theme comparison
+
+The same plot rendered through each built-in theme.
+
+```elixir
+render = fn theme ->
+  Bland.figure(size: {640, 360}, theme: theme, title: Atom.to_string(theme))
+  |> Bland.axes(xlabel: "x", ylabel: "f(x)")
+  |> Bland.line(xs, Enum.map(xs, &:math.sin/1), label: "sin")
+  |> Bland.line(xs, Enum.map(xs, &(:math.cos(&1) / 2)),
+       label: "½ cos", stroke: :dashed)
+  |> Bland.legend(position: :top_right)
+  |> Bland.to_kino()
+end
+
+Kino.Layout.grid(
+  Enum.map([:report_1972, :blueprint, :gazette], render),
+  columns: 1
+)
+```
+
+## 10. Custom theme
+
+Build your house style once, reuse everywhere.
+
+```elixir
+house_style =
+  Bland.Theme.merge(:report_1972, %{
+    title_transform: :none,
+    title_font_size: 16,
+    grid_dasharray: "1 5",
+    series_stroke_width: 1.4,
+    tick_direction: :out,
+    border_inset: 8
+  })
+
+Bland.figure(theme: house_style, size: :a5_landscape, title: "House style")
+|> Bland.axes(xlabel: "x", ylabel: "f(x)")
+|> Bland.line(xs, Enum.map(xs, &:math.sin/1), label: "sin(x)")
+|> Bland.line(xs, Enum.map(xs, &:math.cos/1), label: "cos(x)", stroke: :dashed)
+|> Bland.legend(position: :top_right)
+|> Bland.to_kino()
+```
+
+## 11. Writing to disk
+
+`Bland.write!/2` renders straight to a file. Pair it with your favorite
+SVG-to-PDF converter for LaTeX or print workflows.
+
+```elixir
+fig =
+  Bland.figure(size: :a4_landscape, title: "For the record")
+  |> Bland.axes(xlabel: "x", ylabel: "sin(x)")
+  |> Bland.line(xs, Enum.map(xs, &:math.sin/1))
+
+tmp = Path.join(System.tmp_dir!(), "etd_showcase.svg")
+:ok = Bland.write!(fig, tmp)
+IO.puts("wrote #{tmp}")
+```
