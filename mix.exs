@@ -2,7 +2,7 @@ defmodule Bland.MixProject do
   use Mix.Project
 
   @version "0.1.0"
-  @source_url "https://github.com/jmcguigs/bland"
+  @source_url "https://github.com/Stratogen-Applied-Research/bland"
 
   def project do
     [
