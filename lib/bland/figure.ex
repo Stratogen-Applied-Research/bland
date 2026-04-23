@@ -69,9 +69,11 @@ defmodule Bland.Figure do
           grid: :none | :major | :both,
           series: [map()],
           legend: map() | nil,
+          colorbar: map() | nil,
           title_block: map() | nil,
           annotations: [map()],
-          theme: map()
+          theme: map(),
+          projection: atom()
         }
 
   defstruct width: 1056,
@@ -88,9 +90,11 @@ defmodule Bland.Figure do
             grid: :major,
             series: [],
             legend: nil,
+            colorbar: nil,
             title_block: nil,
             annotations: [],
-            theme: nil
+            theme: nil,
+            projection: :none
 
   @doc """
   Builds a new figure. `opts` accepts any of the struct fields, plus

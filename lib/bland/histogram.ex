@@ -28,59 +28,135 @@ defmodule Bland.Histogram do
   @type opts :: [
           bins: strategy(),
           bin_edges: [number()],
-          density: boolean()
+          density: boolean(),
+          normalize: :count | :pmf | :density | :cmf
         ]
+
+  @type normalize :: :count | :pmf | :density | :cmf
 
   @doc """
   Bins `observations`.
 
-  Returns `{bin_edges, values, density?}` where:
+  Returns `{bin_edges, values, normalize}` where:
 
     * `bin_edges` is a list of length `n_bins + 1`
-    * `values` is a list of length `n_bins` — either integer counts or
-      float densities (counts normalized so `Σ values · bin_width = 1`)
-    * `density?` is `true` when `density: true` was passed
+    * `values` is a list of length `n_bins`
+    * `normalize` is the requested normalization mode (one of
+      `:count`, `:pmf`, `:density`, `:cmf`)
+
+  ## Normalizations
+
+    * `:count`   — raw integer counts per bin (default)
+    * `:pmf`     — probability mass per bin: `count / total`.
+      `Σ values = 1`. Appropriate when bins are unequal width or when
+      you want probabilities rather than densities.
+    * `:density` — probability density: `count / (total · bin_width)`.
+      `Σ (values · widths) = 1`. Integrates to 1 over the domain.
+    * `:cmf`     — cumulative mass function: running sum of PMF values
+      (`[C₀, C₀+C₁, ..., 1]`). Length matches `counts`; see
+      `Bland.histogram/3` for how this is rendered as a staircase.
 
   Options:
 
     * `:bins`      — bin-count strategy (default `:sturges`)
     * `:bin_edges` — explicit edge list; overrides `:bins`
-    * `:density`   — normalize to densities (default `false`)
+    * `:normalize` — `:count | :pmf | :density | :cmf` (default `:count`)
+    * `:density`   — shorthand for `normalize: :density`. Kept for
+      backwards compatibility.
 
   Observations that fall outside `[bin_edges |> hd, bin_edges |> List.last]`
   are silently dropped.
+
+      iex> {_edges, values, :pmf} = Bland.Histogram.bin([1, 2, 2, 3, 3, 3], bins: 3, normalize: :pmf)
+      iex> Enum.sum(values)
+      1.0
   """
-  @spec bin([number()], opts()) :: {[float()], [number()], boolean()}
-  def bin([], _opts), do: {[0.0, 1.0], [0], false}
+  @spec bin([number()], opts()) :: {[float()], [number()], normalize()}
+  def bin([], opts), do: {[0.0, 1.0], [0], resolve_normalize(opts)}
 
   def bin(observations, opts) when is_list(observations) do
-    density? = Keyword.get(opts, :density, false)
+    mode = resolve_normalize(opts)
     edges = resolve_edges(observations, opts)
     counts = count_in(observations, edges)
 
-    values =
-      if density? do
-        total = Enum.sum(counts)
-        widths = bin_widths(edges)
+    values = normalize_counts(counts, edges, mode)
+    {edges, values, mode}
+  end
 
-        Enum.zip(counts, widths)
-        |> Enum.map(fn {c, w} ->
-          cond do
-            total == 0 -> 0.0
-            w == 0 -> 0.0
-            true -> c / (total * w)
-          end
-        end)
-      else
-        counts
+  @doc false
+  @spec resolve_normalize(opts()) :: normalize()
+  def resolve_normalize(opts) do
+    case Keyword.get(opts, :normalize) do
+      nil ->
+        if Keyword.get(opts, :density, false), do: :density, else: :count
+
+      mode when mode in [:count, :pmf, :density, :cmf] ->
+        mode
+
+      other ->
+        raise ArgumentError,
+              "unknown :normalize #{inspect(other)}; " <>
+                "expected :count, :pmf, :density, or :cmf"
+    end
+  end
+
+  defp normalize_counts(counts, _edges, :count), do: counts
+
+  defp normalize_counts(counts, _edges, :pmf) do
+    total = Enum.sum(counts)
+    if total == 0, do: counts, else: Enum.map(counts, &(&1 / total))
+  end
+
+  defp normalize_counts(counts, edges, :density) do
+    total = Enum.sum(counts)
+    widths = bin_widths(edges)
+
+    Enum.zip(counts, widths)
+    |> Enum.map(fn {c, w} ->
+      cond do
+        total == 0 -> 0.0
+        w == 0 -> 0.0
+        true -> c / (total * w)
       end
+    end)
+  end
 
-    {edges, values, density?}
+  defp normalize_counts(counts, _edges, :cmf) do
+    total = Enum.sum(counts)
+    if total == 0, do: counts, else: Enum.scan(counts, 0.0, fn c, acc -> acc + c / total end)
   end
 
   @doc "Edges computed for `observations` under the given strategy."
   @spec edges([number()], opts()) :: [float()]
   def edges(observations, opts), do: resolve_edges(observations, opts)
+
+  @doc """
+  Converts `{bin_edges, cumulative_probabilities}` into a staircase
+  polyline `{xs, ys}` suitable for `Bland.line/4`.
+
+  The returned polyline starts at `(edges |> hd, 0.0)`, steps
+  horizontally across each bin at the previous cumulative level, then
+  jumps vertically at the bin's right edge — the classic empirical
+  CDF shape.
+
+      iex> {xs, ys} = Bland.Histogram.staircase([0.0, 1.0, 2.0], [0.5, 1.0])
+      iex> {xs, ys}
+      {[0.0, 1.0, 1.0, 2.0, 2.0], [0.0, 0.0, 0.5, 0.5, 1.0]}
+  """
+  @spec staircase([number()], [number()]) :: {[float()], [float()]}
+  def staircase([e0 | rest_edges] = edges, cumulative) when length(edges) == length(cumulative) + 1 do
+    {pts, _final} =
+      Enum.zip(rest_edges, cumulative)
+      |> Enum.flat_map_reduce(0.0, fn {edge, cum}, prev ->
+        # Horizontal to next edge at previous level, then vertical step
+        {[{edge * 1.0, prev * 1.0}, {edge * 1.0, cum * 1.0}], cum * 1.0}
+      end)
+
+    points = [{e0 * 1.0, 0.0} | pts]
+    Enum.unzip(points)
+  end
+
+  def staircase(edges, []), do: {Enum.map(edges, &(&1 * 1.0)), [0.0]}
 
   # --- edge computation -----------------------------------------------------
 

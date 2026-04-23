@@ -1,7 +1,7 @@
 defmodule Bland.MixProject do
   use Mix.Project
 
-  @version "0.1.0"
+  @version "0.2.0"
   @source_url "https://github.com/Stratogen-Applied-Research/bland"
 
   def project do
@@ -30,7 +30,11 @@ defmodule Bland.MixProject do
 
   defp deps do
     [
-      {:ex_doc, "~> 0.31", only: :dev, runtime: false}
+      {:ex_doc, "~> 0.31", only: :dev, runtime: false},
+      # Used only by mix bland.basemaps.compile to parse Natural Earth
+      # GeoJSON into the vendored Elixir data modules. The compiled
+      # output has no JSON at runtime.
+      {:jason, "~> 1.4", only: :dev, runtime: false}
     ]
   end
 
@@ -38,6 +42,10 @@ defmodule Bland.MixProject do
     [
       licenses: ["MIT"],
       links: %{"GitHub" => @source_url},
+      # The Natural Earth raw GeoJSON lives in priv/basemaps/source/ and
+      # is NOT shipped in the Hex package — only the compiled Elixir
+      # data modules under lib/bland/basemaps/data/ are. Users who want
+      # to re-run `mix bland.basemaps.compile` clone the repo.
       files: ~w(lib mix.exs README.md LICENSE pages)
     ]
   end

@@ -131,6 +131,59 @@ Bland.figure(size: :a5_landscape, title: "Two populations")
 |> Bland.to_kino()
 ```
 
+## 4c. PMF, density, and empirical CDF
+
+Same binning pipeline, four different normalizations. `:count`
+(default) and `:pmf` both render as bars; `:density` sums to area = 1;
+`:cmf` renders as a staircase step line.
+
+```elixir
+:rand.seed(:exsss, {42, 17, 99})
+
+gaussianish = fn ->
+  Enum.reduce(1..12, 0.0, fn _, acc -> acc + :rand.uniform() end) - 6.0
+end
+
+samples = Enum.map(1..5000, fn _ -> gaussianish.() end)
+
+# PMF — probability mass per bin, Σ = 1
+pmf =
+  Bland.figure(size: {640, 360}, title: "PMF")
+  |> Bland.axes(xlabel: "x", ylabel: "Pr{X ∈ bin}")
+  |> Bland.histogram(samples, bins: 30, normalize: :pmf, hatch: :diagonal)
+  |> Bland.to_kino()
+
+# Density — ∫ = 1
+density =
+  Bland.figure(size: {640, 360}, title: "Density")
+  |> Bland.axes(xlabel: "x", ylabel: "f(x)")
+  |> Bland.histogram(samples, bins: 30, normalize: :density, hatch: :dots_sparse)
+  |> Bland.to_kino()
+
+# Empirical CDF — staircase
+cdf =
+  Bland.figure(size: {640, 360}, title: "Empirical CDF")
+  |> Bland.axes(xlabel: "x", ylabel: "F(x)", ylim: {0.0, 1.05})
+  |> Bland.histogram(samples, bins: 50, normalize: :cmf)
+  |> Bland.hline(0.5, stroke: :dotted)
+  |> Bland.to_kino()
+
+Kino.Layout.grid([pmf, density, cdf], columns: 1)
+```
+
+Overlay a density histogram and its CDF on the same figure — both
+fit cleanly in [0, 1]:
+
+```elixir
+Bland.figure(size: :a5_landscape, title: "Figure 4c — density + CDF")
+|> Bland.axes(xlabel: "x", ylabel: "f(x) · F(x)", ylim: {0.0, 1.05})
+|> Bland.histogram(samples, bins: 40, normalize: :density,
+     hatch: :diagonal, label: "density")
+|> Bland.histogram(samples, bins: 50, normalize: :cmf, label: "F(x)")
+|> Bland.legend(position: :top_left)
+|> Bland.to_kino()
+```
+
 ## 5. Pattern gallery
 
 Every preset pattern rendered side-by-side. All bars share the same
@@ -214,6 +267,197 @@ Bland.figure(size: :a4_landscape, title: "Figure 8 — Full drawing")
      sheet:      "3 of 9",
      rev:        "B"
    )
+|> Bland.to_kino()
+```
+
+## 8b. Heatmap — 2D grid with hatch ramp
+
+A 2D Gaussian, quantized to 7 hatch levels. Cells without a value
+range pick up the default ramp: white → dots → diagonals → crosshatch
+→ dense dots → solid black.
+
+```elixir
+grid =
+  for j <- -10..9, into: [] do
+    for i <- -10..9, into: [] do
+      :math.exp(-(i * i + j * j) / 40)
+    end
+  end
+
+Bland.figure(size: :square, title: "Figure 8b — 2D Gaussian density")
+|> Bland.axes(xlabel: "x", ylabel: "y")
+|> Bland.heatmap(grid,
+     x_edges: Enum.map(-10..10, &(&1 * 1.0)),
+     y_edges: Enum.map(-10..10, &(&1 * 1.0)),
+     label: "density")
+|> Bland.colorbar()
+|> Bland.to_kino()
+```
+
+A comparison heatmap with a coarser ramp — good when you want
+fewer, chunkier bands.
+
+```elixir
+temp =
+  for j <- 0..15, into: [] do
+    for i <- 0..15, into: [] do
+      15 + 10 * :math.sin(i / 3) * :math.cos(j / 4)
+    end
+  end
+
+Bland.figure(size: :a5_landscape, title: "Coarse 4-level ramp")
+|> Bland.axes(xlabel: "x", ylabel: "y")
+|> Bland.heatmap(temp, ramp: Bland.Heatmap.ramp(4), label: "T [°C]")
+|> Bland.colorbar()
+|> Bland.to_kino()
+```
+
+## 8c. Geographic maps (Mercator)
+
+`projection: :mercator` on a figure turns all `(x, y)` series data into
+`(lon, lat)` degrees and projects through the standard web-Mercator
+transform. `Bland.graticule/2` adds a lat/lon grid overlay; the
+`Bland.Geo` module exposes the projection math directly.
+
+```elixir
+cities = [
+  {"NYC",         -74.0, 40.7},
+  {"London",       -0.1, 51.5},
+  {"Tokyo",       139.7, 35.7},
+  {"Sydney",      151.2, -33.9},
+  {"Cape Town",    18.4, -33.9},
+  {"Mexico City", -99.1, 19.4},
+  {"Moscow",       37.6, 55.8},
+  {"Rio",         -43.2, -22.9}
+]
+
+lons = Enum.map(cities, fn {_, l, _} -> l end)
+lats = Enum.map(cities, fn {_, _, la} -> la end)
+{wx, wy} = Bland.Geo.world_rect({-180, 180}, {-80, 80})
+
+fig =
+  Bland.figure(size: {960, 600}, projection: :mercator,
+    title: "Figure 8c — World cities",
+    xlim: {-180, 180}, ylim: {-80, 80}, grid: :none)
+  |> Bland.graticule(lon_step: 30, lat_step: 30, lat_range: {-60, 60})
+  |> Bland.line(wx, wy, stroke: :solid, stroke_width: 1.2)
+  |> Bland.scatter(lons, lats, marker: :circle_filled, marker_size: 4,
+       label: "cities")
+
+Enum.reduce(cities, fig, fn {n, lo, la}, acc ->
+  Bland.annotate(acc, text: n, at: {lo + 3, la + 2}, font_size: 8)
+end)
+|> Bland.legend(position: :bottom_left)
+|> Bland.to_kino()
+```
+
+## 8d. Earth basemap (Natural Earth)
+
+BLAND ships Natural Earth 1:110m and 1:50m coastline + country
+vectors, vendored at compile time. No downloads at runtime. The
+`resolution:` option picks between the datasets:
+
+* `:low`  — 1:110m (default) · ~180 KB of compiled data
+* `:high` — 1:50m · ~2.8 MB of compiled data, much more detail
+* `:schematic` — BLAND's hand-drawn outlines from 0.1
+
+```elixir
+Bland.figure(size: {960, 600}, projection: :mercator,
+  title: "Figure 8d — World (Natural Earth 1:110m)",
+  xlim: {-180, 180}, ylim: {-70, 75}, grid: :none)
+|> Bland.graticule(lon_step: 30, lat_step: 30, lat_range: {-60, 60},
+     labels: false)
+|> Bland.basemap(:earth_coastlines, stroke_width: 0.7)
+|> Bland.basemap(:earth_borders, stroke: :dashed, stroke_width: 0.4)
+|> Bland.basemap(:earth_tropics, stroke: :dotted)
+|> Bland.scatter([-74.0, 139.7, -0.1], [40.7, 35.7, 51.5],
+     marker: :circle_filled, marker_size: 4, label: "cities")
+|> Bland.legend(position: :bottom_left)
+|> Bland.to_kino()
+```
+
+Same plot at high resolution — you'll see every island and a clean
+rendering of fjords, peninsulas, the Caspian, and the Great Lakes:
+
+```elixir
+Bland.figure(size: {1200, 700}, projection: :mercator,
+  title: "World (Natural Earth 1:50m)",
+  xlim: {-180, 180}, ylim: {-70, 78}, grid: :none)
+|> Bland.graticule(lon_step: 30, lat_step: 30, lat_range: {-60, 60},
+     labels: false)
+|> Bland.basemap(:earth_coastlines, resolution: :high, stroke_width: 0.4)
+|> Bland.basemap(:earth_borders, resolution: :high, stroke: :dashed,
+     stroke_width: 0.25)
+|> Bland.to_kino()
+```
+
+Zoom to one country via `only:`:
+
+```elixir
+Bland.figure(size: {900, 700}, projection: :mercator,
+  title: "Japan · 1:50m",
+  xlim: {125, 150}, ylim: {30, 46}, grid: :none)
+|> Bland.basemap(:earth_coastlines, resolution: :high, stroke_width: 0.6)
+|> Bland.basemap(:earth_borders, resolution: :high,
+     only: ["Japan"], stroke_width: 0.5)
+|> Bland.to_kino()
+```
+
+Or use the schematic mode for a deliberately rough, drafted look:
+
+```elixir
+Bland.figure(size: {960, 600}, projection: :mercator,
+  title: "World (schematic)", grid: :none,
+  xlim: {-180, 180}, ylim: {-70, 75})
+|> Bland.basemap(:earth_coastlines, resolution: :schematic, stroke_width: 1.0)
+|> Bland.to_kino()
+```
+
+## 8e. Lunar near side
+
+Selenographic coordinates plus built-in mare outlines. Fill them with a
+hatch pattern to get a classic lunar chart.
+
+```elixir
+Bland.figure(size: {800, 800}, projection: :equirect,
+  title: "Figure 8e — Lunar near side",
+  xlim: {-95, 95}, ylim: {-70, 70}, grid: :none)
+|> Bland.graticule(lon_step: 30, lat_step: 30,
+     lon_range: {-90, 90}, lat_range: {-60, 60}, labels: false)
+|> Bland.basemap(:moon_maria, hatch: :dots_sparse, stroke_width: 0.8)
+|> Bland.to_kino()
+```
+
+Overlay the Apollo landing sites (from Apollo 11 Tranquillity Base
+through Apollo 17 Taurus–Littrow) as scatter points:
+
+```elixir
+apollo_sites = [
+  {"Apollo 11", 23.47, 0.67},
+  {"Apollo 12", -23.42, -3.01},
+  {"Apollo 14", -17.47, -3.65},
+  {"Apollo 15", 3.63, 26.13},
+  {"Apollo 16", 15.50, -8.97},
+  {"Apollo 17", 30.77, 20.19}
+]
+
+lons = Enum.map(apollo_sites, fn {_, l, _} -> l end)
+lats = Enum.map(apollo_sites, fn {_, _, l} -> l end)
+
+fig =
+  Bland.figure(size: {800, 800}, projection: :equirect,
+    title: "Apollo landing sites", grid: :none,
+    xlim: {-60, 60}, ylim: {-30, 50})
+  |> Bland.graticule(lon_step: 15, lat_step: 15,
+       lon_range: {-60, 60}, lat_range: {-30, 45}, labels: false)
+  |> Bland.basemap(:moon_maria, hatch: :dots_sparse)
+  |> Bland.scatter(lons, lats, marker: :cross, marker_size: 6,
+       label: "Apollo site")
+  |> Bland.legend(position: :bottom_right)
+
+Enum.reduce(apollo_sites, fig, fn {n, lon, lat}, acc ->
+  Bland.annotate(acc, text: n, at: {lon + 2, lat + 2}, font_size: 8)
+end)
 |> Bland.to_kino()
 ```
 

@@ -65,6 +65,7 @@ in `Bland` wrap them:
 | `Bland.scatter/4`         | `Bland.Series.Scatter`  | Discrete markers at `(x,y)`                    |
 | `Bland.bar/4`             | `Bland.Series.Bar`      | Categorical bars (grouped via `:group`)        |
 | `Bland.histogram/3`       | `Bland.Series.Histogram`| Binned observations on a numeric x-axis        |
+| `Bland.heatmap/3`         | `Bland.Series.Heatmap`  | 2D grid rendered with a hatch ramp             |
 | `Bland.area/4`            | `Bland.Series.Area`     | Filled region between a curve and a baseline   |
 | `Bland.hline/3`/`vline/3` | `Bland.Series.Hline/Vline` | Horizontal / vertical reference rules       |
 
@@ -121,7 +122,13 @@ Bland.histogram(fig, samples, bins: 20, hatch: :diagonal, label: "trial 1")
 
 # Density normalization + Scott's rule — for comparing distributions
 # of different sample sizes
-Bland.histogram(fig, samples, bins: :scott, density: true, hatch: :crosshatch)
+Bland.histogram(fig, samples, bins: :scott, normalize: :density, hatch: :crosshatch)
+
+# Probability mass function — bars summing to 1
+Bland.histogram(fig, samples, bins: 30, normalize: :pmf, hatch: :diagonal)
+
+# Empirical CDF — renders as a staircase step line (not bars)
+Bland.histogram(fig, samples, bins: 50, normalize: :cmf, label: "F(x)")
 
 # Explicit edges — useful when you want two histograms to share the
 # same binning for comparison
@@ -132,6 +139,57 @@ Bland.histogram(fig, a, bin_edges: edges, label: "A", hatch: :diagonal)
 Strategies accepted by `:bins`: an integer for exactly that many equal-
 width bins, `:sturges` (default), `:sqrt`, `:scott`, or
 `:freedman_diaconis`. See `Bland.Histogram` for the underlying helpers.
+
+### Heatmap
+
+```elixir
+# 20 × 20 grid of a 2D Gaussian
+grid =
+  for j <- -10..9, into: [] do
+    for i <- -10..9, into: [] do
+      :math.exp(-(i * i + j * j) / 40)
+    end
+  end
+
+Bland.figure(size: :square)
+|> Bland.axes(xlabel: "x", ylabel: "y")
+|> Bland.heatmap(grid,
+     x_edges: Enum.map(-10..10, &(&1 * 1.0)),
+     y_edges: Enum.map(-10..10, &(&1 * 1.0)),
+     label: "density")
+|> Bland.colorbar()
+```
+
+Cells are quantized to `length(ramp)` levels (default 7). Pass
+`ramp: Bland.Heatmap.ramp(4)` for a coarser banding, or any list of
+pattern preset atoms for a custom ramp. See `Bland.Heatmap`.
+
+### Geographic maps (Mercator)
+
+Enable a projection on `figure/1` and drop in a vendored Natural Earth
+basemap:
+
+```elixir
+Bland.figure(projection: :mercator, xlim: {-180, 180}, ylim: {-70, 75})
+|> Bland.basemap(:earth_coastlines)                    # 1:110m default
+|> Bland.basemap(:earth_borders, stroke: :dashed)
+|> Bland.basemap(:earth_tropics, stroke: :dotted)
+|> Bland.scatter(city_lons, city_lats, marker: :circle_filled)
+```
+
+Resolutions available via `resolution:`:
+
+  * `:low`       — Natural Earth 1:110m (default, ~180 KB compiled)
+  * `:high`      — Natural Earth 1:50m (~2.8 MB compiled, detailed)
+  * `:schematic` — BLAND's hand-drawn outlines (0.1)
+
+Lunar maria render the same way (`:moon_maria` layer, hand-curated).
+
+All series interpret their x values as longitude (degrees) and y values
+as latitude (degrees). The renderer projects each point through the
+named transform before scaling. `Bland.graticule/2` adds a lat/lon grid
+overlay; `Bland.Geo` exposes the math directly. See
+`Bland.Geo`.
 
 ### Area
 

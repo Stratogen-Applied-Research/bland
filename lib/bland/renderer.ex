@@ -24,7 +24,7 @@ defmodule Bland.Renderer do
   """
 
   alias Bland.{Figure, Patterns, Scale, Svg, Theme, Ticks}
-  alias Bland.Series.{Area, Bar, Histogram, Hline, Line, Scatter, Vline}
+  alias Bland.Series.{Area, Bar, Heatmap, Histogram, Hline, Line, Polygon, Scatter, Vline}
 
   @doc """
   Renders a figure to an SVG binary.
@@ -43,6 +43,7 @@ defmodule Bland.Renderer do
       axes_layer(ctx),
       axis_labels(ctx),
       legend(ctx),
+      colorbar(ctx),
       title_block(ctx),
       annotations(ctx)
     ]
@@ -58,8 +59,20 @@ defmodule Bland.Renderer do
     {px, py, pw, ph} = Figure.plot_rect(fig)
     categorical? = Enum.any?(fig.series, &match?(%Bar{}, &1))
 
-    {xlim, categories} = resolve_xlim(fig, categorical?)
-    ylim = resolve_ylim(fig)
+    projection = fig.projection || :none
+
+    {xlim, categories} = resolve_xlim(fig, categorical?, projection)
+    ylim = resolve_ylim(fig, projection)
+
+    # For geographic projections, also compute the raw lon/lat domain so
+    # axis ticks can be generated in degrees rather than in projected
+    # radians / log-tangent units.
+    {geo_xlim, geo_ylim} =
+      if projection != :none and not categorical? do
+        {resolve_geo_xlim(fig), resolve_geo_ylim(fig)}
+      else
+        {nil, nil}
+      end
 
     xscale = build_scale(fig.xscale, xlim, {px, px + pw})
     yscale = build_scale(fig.yscale, ylim, {py + ph, py})
@@ -74,8 +87,39 @@ defmodule Bland.Renderer do
       yscale: yscale,
       categories: categories,
       categorical?: categorical?,
-      patterns_used: patterns_used
+      patterns_used: patterns_used,
+      projection: projection,
+      geo_xlim: geo_xlim,
+      geo_ylim: geo_ylim
     }
+  end
+
+  # Raw lon/lat extent for geographic figures. When the user sets
+  # `:xlim`/`:ylim` explicitly, that's already in degrees and we just
+  # return it. For `:auto`, collect all series coordinates unprojected.
+  defp resolve_geo_xlim(%Figure{xlim: {a, b}}), do: {a, b}
+
+  defp resolve_geo_xlim(%Figure{xlim: :auto, series: series}) do
+    lons = series |> Enum.flat_map(&xy_points/1) |> Enum.map(&elem(&1, 0))
+
+    case lons do
+      [] -> {-180.0, 180.0}
+      _ -> Scale.auto_domain(lons, 0.0)
+    end
+  end
+
+  defp resolve_geo_ylim(%Figure{ylim: {a, b}}), do: {a, b}
+
+  defp resolve_geo_ylim(%Figure{ylim: :auto, series: series}) do
+    lats = series |> Enum.flat_map(&xy_points/1) |> Enum.map(&elem(&1, 1))
+
+    y_only = series |> Enum.flat_map(&y_only_values/1)
+    all = lats ++ y_only
+
+    case all do
+      [] -> {-80.0, 80.0}
+      _ -> Scale.auto_domain(all, 0.0)
+    end
   end
 
   defp build_scale(:linear, domain, range), do: Scale.linear(domain, range)
@@ -84,18 +128,39 @@ defmodule Bland.Renderer do
   # When a title block is attached, push the plot area up so the block sits
   # in the margin rather than over the curve. We only grow — never shrink —
   # the user's configured margin.
-  defp auto_adjust_margins(%Figure{title_block: nil} = fig), do: fig
+  defp auto_adjust_margins(%Figure{} = fig) do
+    fig
+    |> adjust_for_title_block()
+    |> adjust_for_colorbar()
+  end
 
-  defp auto_adjust_margins(%Figure{title_block: tb, margins: {t, r, b, l}, theme: th} = fig) do
+  defp adjust_for_title_block(%Figure{title_block: nil} = fig), do: fig
+
+  defp adjust_for_title_block(%Figure{title_block: tb, margins: {t, r, b, l}, theme: th} = fig) do
     # Leaves room for tick labels, axis label, and the block itself — plus
     # a buffer so the xlabel does not kiss the title block.
     needed = tb.height + th.border_inset + 56
     %{fig | margins: {t, r, max(b, needed), l}}
   end
 
-  defp resolve_xlim(%Figure{xlim: {a, b}}, _), do: {{a, b}, nil}
+  defp adjust_for_colorbar(%Figure{colorbar: nil} = fig), do: fig
 
-  defp resolve_xlim(%Figure{xlim: :auto, series: series}, true) do
+  defp adjust_for_colorbar(%Figure{colorbar: cb, margins: {t, r, b, l}} = fig) do
+    case Map.get(cb, :position, :right) do
+      :right -> %{fig | margins: {t, max(r, 110), b, l}}
+      :left -> %{fig | margins: {t, r, b, max(l, 130)}}
+      :bottom -> %{fig | margins: {t, r, max(b, 80), l}}
+      _ -> fig
+    end
+  end
+
+  defp resolve_xlim(%Figure{xlim: {a, b}}, _, proj) do
+    {xa, _} = project_xy({a, 0}, proj)
+    {xb, _} = project_xy({b, 0}, proj)
+    {{xa, xb}, nil}
+  end
+
+  defp resolve_xlim(%Figure{xlim: :auto, series: series}, true, _proj) do
     categories =
       series
       |> Enum.flat_map(fn
@@ -105,12 +170,11 @@ defmodule Bland.Renderer do
       |> Enum.uniq()
 
     n = length(categories)
-    # One slot per category, with half-slot padding on each end.
     {{-0.5, n - 0.5}, categories}
   end
 
-  defp resolve_xlim(%Figure{xlim: :auto, series: series}, false) do
-    values = series |> Enum.flat_map(&x_values/1)
+  defp resolve_xlim(%Figure{xlim: :auto, series: series}, false, proj) do
+    values = series |> Enum.flat_map(&xy_points/1) |> project_points(proj) |> Enum.map(&elem(&1, 0))
 
     domain =
       case values do
@@ -121,31 +185,58 @@ defmodule Bland.Renderer do
     {domain, nil}
   end
 
-  defp resolve_ylim(%Figure{ylim: {a, b}}), do: {a, b}
+  defp resolve_ylim(%Figure{ylim: {a, b}}, proj) do
+    project_xy_y_range({a, b}, proj)
+  end
 
-  defp resolve_ylim(%Figure{ylim: :auto, series: series}) do
-    values = series |> Enum.flat_map(&y_values/1)
+  defp resolve_ylim(%Figure{ylim: :auto, series: series}, proj) do
+    values = series |> Enum.flat_map(&xy_points/1) |> project_points(proj) |> Enum.map(&elem(&1, 1))
 
-    case values do
+    # Series that contribute only y data (hline, histogram, bar) aren't
+    # in xy_points; fold them in here with lon/lat→y identity.
+    y_only = series |> Enum.flat_map(&y_only_values/1)
+    all = values ++ y_only
+
+    case all do
       [] -> {0.0, 1.0}
-      _ -> Scale.auto_domain(values, 0.08)
+      _ -> Scale.auto_domain(all, 0.08)
     end
   end
 
-  defp x_values(%Line{xs: xs}), do: xs
-  defp x_values(%Scatter{xs: xs}), do: xs
-  defp x_values(%Area{xs: xs}), do: xs
-  defp x_values(%Histogram{bin_edges: edges}), do: edges
-  defp x_values(%Vline{x: x}), do: [x]
-  defp x_values(_), do: []
+  # `xy_points` returns `[{x,y}, ...]` for series that carry 2D coordinates.
+  defp xy_points(%Line{xs: xs, ys: ys}), do: Enum.zip(xs, ys)
+  defp xy_points(%Scatter{xs: xs, ys: ys}), do: Enum.zip(xs, ys)
+  defp xy_points(%Area{xs: xs, ys: ys, baseline: b}),
+    do: Enum.zip(xs, ys) ++ [{List.first(xs) || 0, b}, {List.last(xs) || 0, b}]
+  defp xy_points(%Histogram{bin_edges: edges}),
+    do: Enum.map(edges, fn e -> {e, 0} end)
+  defp xy_points(%Heatmap{x_edges: nil}), do: []
+  defp xy_points(%Heatmap{x_edges: xe, y_edges: ye}) do
+    # Four corners suffice for extent.
+    [{List.first(xe), List.first(ye)}, {List.last(xe), List.last(ye)}]
+  end
+  defp xy_points(%Polygon{xs: xs, ys: ys}), do: Enum.zip(xs, ys)
+  defp xy_points(%Vline{x: x}), do: [{x, 0}]
+  defp xy_points(_), do: []
 
-  defp y_values(%Line{ys: ys}), do: ys
-  defp y_values(%Scatter{ys: ys}), do: ys
-  defp y_values(%Area{ys: ys, baseline: b}), do: [b | ys]
-  defp y_values(%Bar{values: v}), do: [0 | v]
-  defp y_values(%Histogram{values: v}), do: [0 | v]
-  defp y_values(%Hline{y: y}), do: [y]
-  defp y_values(_), do: []
+  defp y_only_values(%Histogram{values: v}), do: [0 | v]
+  defp y_only_values(%Bar{values: v}), do: [0 | v]
+  defp y_only_values(%Hline{y: y}), do: [y]
+  defp y_only_values(_), do: []
+
+  defp project_points(points, :none), do: points
+  defp project_points(points, proj), do: Enum.map(points, &project_xy(&1, proj))
+
+  defp project_xy({x, y}, :none), do: {x, y}
+  defp project_xy({x, y}, proj), do: Bland.Geo.project(proj, {x, y})
+
+  defp project_xy_y_range({a, b}, :none), do: {a, b}
+
+  defp project_xy_y_range({a, b}, proj) do
+    {_, ya} = Bland.Geo.project(proj, {0, a})
+    {_, yb} = Bland.Geo.project(proj, {0, b})
+    {ya, yb}
+  end
 
   defp collect_patterns(series) do
     series
@@ -153,6 +244,9 @@ defmodule Bland.Renderer do
       %Bar{hatch: h} -> [h]
       %Area{hatch: h} -> [h]
       %Histogram{hatch: h} -> [h]
+      %Polygon{hatch: h} -> [h]
+      %Heatmap{ramp: r} when is_list(r) -> r
+      %Heatmap{ramp: nil} -> Bland.Heatmap.default_ramp()
       _ -> []
     end)
     |> Enum.reject(&is_nil/1)
@@ -280,6 +374,7 @@ defmodule Bland.Renderer do
 
     points =
       Enum.zip(l.xs, l.ys)
+      |> Enum.map(&project_xy(&1, ctx.projection))
       |> Enum.map(fn {x, y} -> {Scale.project(ctx.xscale, x), Scale.project(ctx.yscale, y)} end)
 
     line =
@@ -314,6 +409,7 @@ defmodule Bland.Renderer do
     sw = s.stroke_width || ctx.theme.marker_stroke_width
 
     Enum.zip(s.xs, s.ys)
+    |> Enum.map(&project_xy(&1, ctx.projection))
     |> Enum.map(fn {x, y} ->
       Bland.Markers.draw(marker, Scale.project(ctx.xscale, x),
                                Scale.project(ctx.yscale, y),
@@ -365,6 +461,64 @@ defmodule Bland.Renderer do
     end)
   end
 
+  defp draw_series(%Heatmap{} = h, _index, ctx) do
+    ramp = h.ramp || Bland.Heatmap.default_ramp()
+    n_levels = length(ramp)
+
+    range =
+      case h.range do
+        :auto -> Bland.Heatmap.extent(h.data)
+        {_lo, _hi} = r -> r
+      end
+
+    rows = h.data
+    n_rows = length(rows)
+
+    x_edges = h.x_edges
+    y_edges = h.y_edges
+
+    rows
+    |> Enum.with_index()
+    |> Enum.flat_map(fn {row, ri} ->
+      # Map data row index to the pair of y_edges this row occupies.
+      # With :bottom_left origin, data[0] sits at y_edges[0..1]; with
+      # :top_left, data[0] sits at the top, i.e. y_edges[n-1..n].
+      y_index =
+        case h.origin do
+          :top_left -> n_rows - 1 - ri
+          _ -> ri
+        end
+
+      y_lo = Enum.at(y_edges, y_index)
+      y_hi = Enum.at(y_edges, y_index + 1)
+
+      row
+      |> Enum.with_index()
+      |> Enum.map(fn {val, ci} ->
+        x_lo = Enum.at(x_edges, ci)
+        x_hi = Enum.at(x_edges, ci + 1)
+
+        level = Bland.Heatmap.quantize(val, range, n_levels)
+        pattern = Enum.at(ramp, level)
+
+        px_l = Scale.project(ctx.xscale, x_lo)
+        px_r = Scale.project(ctx.xscale, x_hi)
+        py_lo = Scale.project(ctx.yscale, y_lo)
+        py_hi = Scale.project(ctx.yscale, y_hi)
+
+        x = min(px_l, px_r)
+        y = min(py_lo, py_hi)
+        w = abs(px_r - px_l)
+        height = abs(py_hi - py_lo)
+
+        Svg.rect(x, y, w, height,
+          fill: Patterns.fill(pattern),
+          stroke: "none"
+        )
+      end)
+    end)
+  end
+
   defp draw_series(%Histogram{bin_edges: edges, values: vals} = h, index, ctx) do
     hatch = h.hatch || Patterns.cycle(index)
     sw = h.stroke_width || ctx.theme.series_stroke_width
@@ -390,6 +544,37 @@ defmodule Bland.Renderer do
     end)
   end
 
+  defp draw_series(%Polygon{xs: xs, ys: ys} = p, _index, ctx) do
+    stroke = p.stroke || :solid
+    sw = p.stroke_width || ctx.theme.series_stroke_width
+
+    points =
+      Enum.zip(xs, ys)
+      |> Enum.map(&project_xy(&1, ctx.projection))
+      |> Enum.map(fn {x, y} -> {Scale.project(ctx.xscale, x), Scale.project(ctx.yscale, y)} end)
+
+    case points do
+      [] ->
+        []
+
+      _ ->
+        fill =
+          case p.hatch do
+            nil -> "none"
+            :none -> "none"
+            h -> Patterns.fill(h)
+          end
+
+        Svg.polygon(points,
+          fill: fill,
+          stroke: ctx.theme.foreground,
+          "stroke-width": sw,
+          "stroke-dasharray": Bland.Strokes.dasharray(stroke),
+          "stroke-linejoin": "round"
+        )
+    end
+  end
+
   defp draw_series(%Area{} = a, index, ctx) do
     hatch = a.hatch || Patterns.cycle(index)
     stroke = a.stroke || :solid
@@ -398,6 +583,7 @@ defmodule Bland.Renderer do
 
     points =
       Enum.zip(a.xs, a.ys)
+      |> Enum.map(&project_xy(&1, ctx.projection))
       |> Enum.map(fn {x, y} -> {Scale.project(ctx.xscale, x), Scale.project(ctx.yscale, y)} end)
 
     case points do
@@ -481,33 +667,44 @@ defmodule Bland.Renderer do
   end
 
   defp x_ticks(%{fig: f, theme: t, plot_rect: {px, py, pw, ph},
-                 xscale: xs, categorical?: cat, categories: cats}) do
-    values =
-      if cat, do: Enum.with_index(cats) |> Enum.map(fn {_, i} -> i end),
-             else: tick_values(f.xscale, xs.domain, f.series)
+                 xscale: xs, categorical?: cat, categories: cats,
+                 projection: proj, geo_xlim: geo_xlim}) do
+    # Three cases: categorical (labels = category names), geographic
+    # (ticks in degrees, labels formatted "30°E"), or the plain linear/
+    # log numeric path.
+    {values, project_val, label_for} =
+      cond do
+        cat ->
+          vals = cats |> Enum.with_index() |> Enum.map(fn {_, i} -> i end)
+          {vals, fn v -> v end, fn v -> Enum.at(cats, v, "") |> to_string() end}
+
+        proj != :none and not is_nil(geo_xlim) ->
+          vals = nice_geo_ticks(geo_xlim, 7)
+          {vals, fn lon -> elem(project_xy({lon, 0}, proj), 0) end, &format_lon_deg/1}
+
+        true ->
+          {tick_values(f.xscale, xs.domain, f.series), fn v -> v end, &Ticks.format/1}
+      end
+
+    tdir = t.tick_direction
+    len = t.tick_length
+
+    {y0, y1, ly} =
+      case tdir do
+        :in -> {py + ph, py + ph - len, py + ph + len + 2}
+        :out -> {py + ph, py + ph + len, py + ph + len + 2}
+        :both -> {py + ph - len, py + ph + len, py + ph + len + 2}
+      end
 
     Enum.map(values, fn v ->
-      x = Scale.project(xs, v)
-      len = t.tick_length
-      tdir = t.tick_direction
-
-      {y0, y1, ly} =
-        case tdir do
-          :in -> {py + ph, py + ph - len, py + ph + len + 2}
-          :out -> {py + ph, py + ph + len, py + ph + len + 2}
-          :both -> {py + ph - len, py + ph + len, py + ph + len + 2}
-        end
-
-      label =
-        if cat, do: Enum.at(cats, v, "") |> to_string(),
-               else: Ticks.format(v)
+      x = Scale.project(xs, project_val.(v))
 
       [
         Svg.line(x, y0, x, y1,
           stroke: t.foreground,
           "stroke-width": t.tick_stroke_width
         ),
-        Svg.text(x, ly + t.tick_label_font_size - 2, Svg.escape(label),
+        Svg.text(x, ly + t.tick_label_font_size - 2, Svg.escape(label_for.(v)),
           "font-size": t.tick_label_font_size,
           "font-family": t.label_font_family,
           "text-anchor": "middle",
@@ -520,26 +717,34 @@ defmodule Bland.Renderer do
 
   defp clipped_x_extent_guard(_px, _pw), do: []
 
-  defp y_ticks(%{fig: f, theme: t, plot_rect: {px, _py, _, _ph}, yscale: ys}) do
-    values = tick_values(f.yscale, ys.domain, f.series)
+  defp y_ticks(%{fig: f, theme: t, plot_rect: {px, _py, _, _ph}, yscale: ys,
+                 projection: proj, geo_ylim: geo_ylim}) do
+    {values, project_val, label_for} =
+      if proj != :none and not is_nil(geo_ylim) do
+        vals = nice_geo_ticks(geo_ylim, 6)
+        {vals, fn lat -> elem(project_xy({0, lat}, proj), 1) end, &format_lat_deg/1}
+      else
+        {tick_values(f.yscale, ys.domain, f.series), fn v -> v end, &Ticks.format/1}
+      end
+
+    len = t.tick_length
+
+    {x0, x1, lx} =
+      case t.tick_direction do
+        :in -> {px, px + len, px - 4}
+        :out -> {px, px - len, px - len - 4}
+        :both -> {px - len, px + len, px - len - 4}
+      end
 
     Enum.map(values, fn v ->
-      y = Scale.project(ys, v)
-      len = t.tick_length
-
-      {x0, x1, lx} =
-        case t.tick_direction do
-          :in -> {px, px + len, px - 4}
-          :out -> {px, px - len, px - len - 4}
-          :both -> {px - len, px + len, px - len - 4}
-        end
+      y = Scale.project(ys, project_val.(v))
 
       [
         Svg.line(x0, y, x1, y,
           stroke: t.foreground,
           "stroke-width": t.tick_stroke_width
         ),
-        Svg.text(lx, y + t.tick_label_font_size / 2 - 2, Svg.escape(Ticks.format(v)),
+        Svg.text(lx, y + t.tick_label_font_size / 2 - 2, Svg.escape(label_for.(v)),
           "font-size": t.tick_label_font_size,
           "font-family": t.label_font_family,
           "text-anchor": "end",
@@ -548,6 +753,52 @@ defmodule Bland.Renderer do
       ]
     end)
   end
+
+  # --- geographic tick helpers ---------------------------------------------
+
+  # Picks nice-rounded degree ticks (every 1°, 5°, 10°, 15°, 30°, 45°, 90°)
+  # depending on domain span. Target is approximate tick count.
+  @geo_steps [1, 2, 5, 10, 15, 20, 30, 45, 60, 90]
+
+  defp nice_geo_ticks({a, b}, target) when a != b do
+    {lo, hi} = if a < b, do: {a, b}, else: {b, a}
+    span = hi - lo
+    raw_step = span / max(target, 1)
+    step = Enum.find(@geo_steps, fn s -> s >= raw_step end) || 90
+
+    start = :math.ceil(lo / step) * step
+    stop = :math.floor(hi / step) * step
+    n = round((stop - start) / step)
+
+    if n < 0, do: [], else: Enum.map(0..n, fn i -> start + i * step end)
+  end
+
+  defp format_lon_deg(v) do
+    # Normalize float ticks that happen to land on integers (from nice_geo_ticks)
+    v = if is_float(v) and v == trunc(v), do: trunc(v), else: v
+
+    cond do
+      v == 0 -> "0°"
+      v > 0 and v <= 180 -> "#{fmt_deg(v)}°E"
+      v < 0 and v >= -180 -> "#{fmt_deg(-v)}°W"
+      # Past the antimeridian, wrap — e.g. 190°E == 170°W
+      v > 180 -> "#{fmt_deg(360 - v)}°W"
+      v < -180 -> "#{fmt_deg(v + 360)}°E"
+    end
+  end
+
+  defp format_lat_deg(v) do
+    v = if is_float(v) and v == trunc(v), do: trunc(v), else: v
+
+    cond do
+      v == 0 -> "0°"
+      v > 0 -> "#{fmt_deg(v)}°N"
+      true -> "#{fmt_deg(-v)}°S"
+    end
+  end
+
+  defp fmt_deg(v) when is_integer(v), do: Integer.to_string(v)
+  defp fmt_deg(v) when is_float(v), do: :erlang.float_to_binary(v, decimals: 1)
 
   defp axis_labels(%{fig: f, theme: t, plot_rect: {px, py, pw, ph}}) do
     # When the title block is attached we auto-expanded the bottom margin,
@@ -773,6 +1024,136 @@ defmodule Bland.Renderer do
 
   # --- title block ----------------------------------------------------------
 
+  # --- colorbar -------------------------------------------------------------
+
+  defp colorbar(%{fig: %{colorbar: nil}}), do: []
+
+  defp colorbar(%{fig: f, theme: t, plot_rect: {px, py, pw, ph}}) do
+    opts = f.colorbar
+    heatmap = find_colorbar_heatmap(f.series)
+
+    ramp = Map.get(opts, :ramp) || (heatmap && heatmap.ramp) || Bland.Heatmap.default_ramp()
+
+    range =
+      Map.get(opts, :range) ||
+        case heatmap do
+          %{range: {_, _} = r} -> r
+          %{data: data} -> Bland.Heatmap.extent(data)
+          _ -> {0.0, 1.0}
+        end
+
+    label = Map.get(opts, :label) || (heatmap && heatmap.label)
+    position = Map.get(opts, :position, :right)
+    tick_count = Map.get(opts, :levels, 5)
+
+    bar_w = 16
+    gap = 14
+    tick_px = 36
+
+    {bar_x, bar_y, bar_h} =
+      case position do
+        :right -> {px + pw + gap, py, ph}
+        :left -> {px - gap - bar_w - tick_px, py, ph}
+        :bottom -> {px, py + ph + 24, ph}
+        {x, y} -> {x, y, ph}
+      end
+
+    segments = render_ramp_segments(ramp, bar_x, bar_y, bar_w, bar_h, t)
+    frame =
+      Svg.rect(bar_x, bar_y, bar_w, bar_h,
+        fill: "none",
+        stroke: t.foreground,
+        "stroke-width": t.axis_stroke_width
+      )
+
+    ticks = render_ramp_ticks(range, bar_x, bar_y, bar_w, bar_h, tick_count, position, t)
+
+    label_el =
+      if label do
+        {lx, ly} =
+          case position do
+            :right -> {bar_x + bar_w + tick_px + 8, bar_y + bar_h / 2}
+            :left -> {bar_x - 8, bar_y + bar_h / 2}
+            _ -> {bar_x + bar_w / 2, bar_y + bar_h + 18}
+          end
+
+        rotation =
+          case position do
+            :bottom -> ""
+            _ -> " rotate(-90 #{Svg.num(lx)} #{Svg.num(ly)})"
+          end
+
+        Svg.text(lx, ly, Svg.escape(label),
+          "font-size": t.axis_label_font_size,
+          "font-family": t.label_font_family,
+          "text-anchor": "middle",
+          fill: t.foreground,
+          "font-style": "italic",
+          transform: "translate(0 0)" <> rotation
+        )
+      else
+        []
+      end
+
+    [segments, frame, ticks, label_el]
+  end
+
+  defp find_colorbar_heatmap(series) do
+    series
+    |> Enum.reverse()
+    |> Enum.find(&match?(%Heatmap{}, &1))
+  end
+
+  defp render_ramp_segments(ramp, bx, by, bw, bh, _t) do
+    n = length(ramp)
+    step = bh / n
+
+    ramp
+    |> Enum.with_index()
+    |> Enum.map(fn {pattern, i} ->
+      # i=0 (lightest) at bottom, i=n-1 (darkest) at top
+      y = by + bh - (i + 1) * step
+
+      Svg.rect(bx, y, bw, step,
+        fill: Patterns.fill(pattern),
+        stroke: "none"
+      )
+    end)
+  end
+
+  defp render_ramp_ticks({lo, hi}, bx, by, bw, bh, count, position, t) do
+    count = max(count, 2)
+
+    Enum.map(0..(count - 1), fn i ->
+      frac = i / (count - 1)
+      val = lo + frac * (hi - lo)
+      # frac = 0 → bottom (lo), frac = 1 → top (hi)
+      y = by + bh - frac * bh
+
+      {tick_x_from, tick_x_to, label_x, anchor} =
+        case position do
+          :left -> {bx, bx - 4, bx - 6, "end"}
+          _ -> {bx + bw, bx + bw + 4, bx + bw + 6, "start"}
+        end
+
+      [
+        Svg.line(tick_x_from, y, tick_x_to, y,
+          stroke: t.foreground,
+          "stroke-width": t.tick_stroke_width
+        ),
+        Svg.text(label_x, y + t.tick_label_font_size / 2 - 2,
+          Svg.escape(Ticks.format(val)),
+          "font-size": t.tick_label_font_size,
+          "font-family": t.label_font_family,
+          "text-anchor": anchor,
+          fill: t.foreground
+        )
+      ]
+    end)
+  end
+
+  # --- title block ----------------------------------------------------------
+
   defp title_block(%{fig: %{title_block: nil}}), do: []
 
   defp title_block(%{fig: f, theme: t}) do
@@ -858,13 +1239,14 @@ defmodule Bland.Renderer do
 
   defp annotations(%{fig: %{annotations: []}}), do: []
 
-  defp annotations(%{fig: f, theme: t, xscale: xs, yscale: ys}) do
-    Enum.map(f.annotations, fn a -> annotation(a, xs, ys, t) end)
+  defp annotations(%{fig: f, theme: t, xscale: xs, yscale: ys, projection: proj}) do
+    Enum.map(f.annotations, fn a -> annotation(a, xs, ys, t, proj) end)
   end
 
-  defp annotation(%{type: :text, x: x, y: y, text: text} = a, xs, ys, t) do
-    px = Scale.project(xs, x)
-    py = Scale.project(ys, y)
+  defp annotation(%{type: :text, x: x, y: y, text: text} = a, xs, ys, t, proj) do
+    {px_data, py_data} = project_xy({x, y}, proj)
+    px = Scale.project(xs, px_data)
+    py = Scale.project(ys, py_data)
 
     # `paint-order: stroke` draws the stroke first and the fill on top, so
     # a thick background-colored stroke becomes a halo that keeps the
@@ -883,11 +1265,13 @@ defmodule Bland.Renderer do
     )
   end
 
-  defp annotation(%{type: :arrow, from: {fx, fy}, to: {tx, ty}}, xs, ys, t) do
-    x1 = Scale.project(xs, fx)
-    y1 = Scale.project(ys, fy)
-    x2 = Scale.project(xs, tx)
-    y2 = Scale.project(ys, ty)
+  defp annotation(%{type: :arrow, from: {fx, fy}, to: {tx, ty}}, xs, ys, t, proj) do
+    {fpx, fpy} = project_xy({fx, fy}, proj)
+    {tpx, tpy} = project_xy({tx, ty}, proj)
+    x1 = Scale.project(xs, fpx)
+    y1 = Scale.project(ys, fpy)
+    x2 = Scale.project(xs, tpx)
+    y2 = Scale.project(ys, tpy)
 
     # Simple arrow: line + small triangle at the tip
     angle = :math.atan2(y2 - y1, x2 - x1)
@@ -903,5 +1287,5 @@ defmodule Bland.Renderer do
     ]
   end
 
-  defp annotation(_, _, _, _), do: []
+  defp annotation(_, _, _, _, _), do: []
 end

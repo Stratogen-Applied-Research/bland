@@ -11,7 +11,9 @@ defmodule Bland.Series do
     * `Bland.Series.Scatter`   — discrete points with markers
     * `Bland.Series.Bar`       — categorical bars with hatched fills
     * `Bland.Series.Histogram` — binned observations (numeric x-axis)
+    * `Bland.Series.Heatmap`   — 2D grid of hatched cells
     * `Bland.Series.Area`      — filled region between a curve and a baseline
+    * `Bland.Series.Polygon`   — closed filled polygon
     * `Bland.Series.Hline`     — horizontal reference line
     * `Bland.Series.Vline`     — vertical reference line
 
@@ -71,8 +73,10 @@ defmodule Bland.Series do
 
     Fields:
       * `:bin_edges` — strictly increasing list, length `n + 1`
-      * `:values`    — length `n`; counts, or densities if `:density` is `true`
-      * `:density`   — whether `:values` are densities (for y-label hinting)
+      * `:values`    — length `n`; interpretation depends on `:normalize`
+      * `:normalize` — `:count | :pmf | :density | :cmf`
+      * `:density`   — backwards-compat boolean; `true` iff
+        `:normalize` is `:density`
     """
     defstruct type: :histogram,
               bin_edges: [],
@@ -80,7 +84,36 @@ defmodule Bland.Series do
               label: nil,
               hatch: nil,
               stroke_width: nil,
+              normalize: :count,
               density: false
+  end
+
+  defmodule Heatmap do
+    @moduledoc """
+    2D grid rendered as hatched cells. See `Bland.heatmap/3` and
+    `Bland.Heatmap`.
+
+    Fields:
+      * `:data`    — list of rows; each row is a list of numbers.
+        With `origin: :bottom_left` (default), `data` is addressed
+        `data[row][col]` where row 0 is the bottom row.
+      * `:x_edges` — list of length `cols + 1` giving column boundaries
+      * `:y_edges` — list of length `rows + 1` giving row boundaries
+      * `:ramp`    — list of pattern presets (light → dark). The cell
+        value is quantized to `length(ramp)` levels.
+      * `:range`   — `{lo, hi}` used for quantization. `:auto` derives
+        from data.
+      * `:origin`  — `:bottom_left` (default) or `:top_left` for
+        matrix-style display where row 0 is the top row.
+    """
+    defstruct type: :heatmap,
+              data: [],
+              x_edges: nil,
+              y_edges: nil,
+              label: nil,
+              ramp: nil,
+              range: :auto,
+              origin: :bottom_left
   end
 
   defmodule Area do
@@ -92,6 +125,30 @@ defmodule Bland.Series do
               xs: [],
               ys: [],
               baseline: 0.0,
+              label: nil,
+              hatch: nil,
+              stroke: :solid,
+              stroke_width: nil
+  end
+
+  defmodule Polygon do
+    @moduledoc """
+    Closed filled polygon in data space. See `Bland.polygon/4`.
+
+    Unlike `Area`, which sweeps a curve back to a baseline, `Polygon`
+    fills whatever arbitrary shape its vertices describe. The last
+    point is implicitly connected back to the first.
+
+    Fields:
+      * `:xs`, `:ys` — vertex coordinates (same length)
+      * `:hatch`     — optional fill pattern. When `nil`, the polygon is
+        stroke-only.
+      * `:stroke`    — outline dash preset (default `:solid`)
+      * `:stroke_width`, `:label`
+    """
+    defstruct type: :polygon,
+              xs: [],
+              ys: [],
               label: nil,
               hatch: nil,
               stroke: :solid,
@@ -120,6 +177,10 @@ defmodule Bland.Series do
   def x_extent(%Histogram{bin_edges: []}), do: nil
   def x_extent(%Histogram{bin_edges: edges}),
     do: {List.first(edges), List.last(edges)}
+  def x_extent(%Heatmap{x_edges: nil}), do: nil
+  def x_extent(%Heatmap{x_edges: edges}),
+    do: {List.first(edges), List.last(edges)}
+  def x_extent(%Polygon{xs: xs}), do: extent(xs)
   def x_extent(%Vline{x: x}), do: {x, x}
   def x_extent(_), do: nil
 
@@ -132,6 +193,10 @@ defmodule Bland.Series do
   def y_extent(%Area{ys: ys, baseline: base}), do: extent([base | ys])
   def y_extent(%Bar{values: v, group: _}), do: extent([0 | v])
   def y_extent(%Histogram{values: v}), do: extent([0 | v])
+  def y_extent(%Heatmap{y_edges: nil}), do: nil
+  def y_extent(%Heatmap{y_edges: edges}),
+    do: {List.first(edges), List.last(edges)}
+  def y_extent(%Polygon{ys: ys}), do: extent(ys)
   def y_extent(%Hline{y: y}), do: {y, y}
   def y_extent(_), do: nil
 
