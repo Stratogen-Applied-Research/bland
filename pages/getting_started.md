@@ -1,8 +1,12 @@
 # Getting Started
 
+![Hero — damped oscillation](assets/hero_line.svg)
+
 This guide walks through the BLAND pipeline end-to-end. By the end you
 should be able to build a figure, cycle through the supported series
 types, render it, and embed it in Livebook or drop it into a paper.
+
+See the [gallery](gallery.md) for every plot type at a glance.
 
 ## Installation
 

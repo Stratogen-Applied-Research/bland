@@ -2,6 +2,8 @@ defmodule Bland.Heatmap do
   @moduledoc """
   Binning and ramp helpers for monochrome heatmaps.
 
+  ![2D Gaussian density with colorbar](assets/hero_heatmap.svg)
+
   A heatmap renders a 2D grid of numeric values as shaded cells. In a
   monochrome world, shading comes from *hatch density* — we quantize
   each value to one of N levels, then fill each cell with the pattern

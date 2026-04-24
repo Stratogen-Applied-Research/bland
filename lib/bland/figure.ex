@@ -73,7 +73,8 @@ defmodule Bland.Figure do
           title_block: map() | nil,
           annotations: [map()],
           theme: map(),
-          projection: atom()
+          projection: atom(),
+          clip: :rect | :circle
         }
 
   defstruct width: 1056,
@@ -94,7 +95,9 @@ defmodule Bland.Figure do
             title_block: nil,
             annotations: [],
             theme: nil,
-            projection: :none
+            projection: :none,
+            clip: :rect,
+            axes: :both
 
   @doc """
   Builds a new figure. `opts` accepts any of the struct fields, plus

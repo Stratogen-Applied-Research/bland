@@ -2,6 +2,8 @@ defmodule Bland do
   @moduledoc """
   **BLAND — Elixir Technical Drawing.**
 
+  ![Damped oscillation — hero figure with title block](assets/hero_title_block.svg)
+
   A pure-Elixir library for producing monochrome, paper-ready plots in the
   visual tradition of 1960s–1980s engineering reports: thin black rules,
   serif type, crisp frames, hatched fills, and optional drafting title
@@ -10,6 +12,8 @@ defmodule Bland do
   BLAND emits SVG. SVG is the right format for paper output — resolution-
   independent, prints clean on any printer, and embeds into Livebook, PDF
   pipelines, and LaTeX figures without conversion.
+
+  See the [gallery](gallery.md) for every plot type at a glance.
 
   > #### Design philosophy {: .info}
   >
@@ -86,6 +90,265 @@ defmodule Bland do
   """
   @spec figure(keyword()) :: Figure.t()
   def figure(opts \\ []), do: Figure.new(opts)
+
+  @doc """
+  Creates a polar figure.
+
+  Series data on the returned figure is interpreted as `{θ, r}` pairs
+  (θ in radians). The renderer projects every point through
+  `(θ, r) → (r·cos θ, r·sin θ)`, clips to the disk of radius `rmax`,
+  and suppresses the default x/y axes.
+
+  Pair with `polar_grid/2` to add the concentric / radial reference
+  grid:
+
+      Bland.polar_figure(rmax: 1.0, title: "Antenna gain")
+      |> Bland.polar_grid(r_ticks: [0.25, 0.5, 0.75, 1.0])
+      |> Bland.line(thetas, gains)
+
+  ## Options
+
+    * `:rmax`  — radius of the plotting disk in data units (default `1.0`)
+    * `:size`  — canvas size; defaults to `:square` for equal aspect
+    * Any other figure option (`:title`, `:theme`, etc.) is forwarded.
+  """
+  @spec polar_figure(keyword()) :: Figure.t()
+  def polar_figure(opts \\ []) do
+    rmax = Keyword.get(opts, :rmax, 1.0)
+    size = Keyword.get(opts, :size, :square)
+
+    defaults = [
+      size: size,
+      projection: :polar,
+      xlim: {-rmax, rmax},
+      ylim: {-rmax, rmax},
+      grid: :none,
+      clip: :circle,
+      axes: :none
+    ]
+
+    figure(Keyword.merge(defaults, Keyword.drop(opts, [:rmax])))
+  end
+
+  @doc """
+  Adds a polar reference grid to a figure built via `polar_figure/1`.
+
+  Produces concentric circles at the requested radii and radial lines
+  at the requested angles, plus perimeter labels for the angles.
+
+  ## Options
+
+    * `:r_ticks`       — list of radii (default: four evenly-spaced
+      steps ending at `rmax`)
+    * `:theta_step`    — angle between radial lines, in degrees
+      (default `30`)
+    * `:stroke`        — dash preset for the grid lines (default `:dotted`)
+    * `:stroke_width`  — grid line weight (default `0.4`)
+    * `:labels`        — `true` (default) to annotate each angular
+      direction at the perimeter
+    * `:r_labels`      — `true` to annotate each radius on the 0° ray
+      (default `false`)
+    * `:samples`       — points per circle (default `120`)
+  """
+  @spec polar_grid(Figure.t(), keyword()) :: Figure.t()
+  def polar_grid(%Figure{xlim: {xlo, xhi}} = fig, opts \\ []) do
+    rmax = max(abs(xlo), abs(xhi)) * 1.0
+
+    r_ticks = Keyword.get(opts, :r_ticks, default_r_ticks(rmax))
+    theta_step_deg = Keyword.get(opts, :theta_step, 30)
+    stroke = Keyword.get(opts, :stroke, :dotted)
+    sw = Keyword.get(opts, :stroke_width, 0.4)
+    samples = Keyword.get(opts, :samples, 120)
+    with_labels? = Keyword.get(opts, :labels, true)
+    with_r_labels? = Keyword.get(opts, :r_labels, false)
+
+    theta_ticks_deg = Enum.to_list(0..(360 - theta_step_deg)//theta_step_deg)
+    theta_ticks = Enum.map(theta_ticks_deg, &(&1 * :math.pi() / 180))
+
+    fig =
+      Enum.reduce(r_ticks, fig, fn r, acc ->
+        {thetas, rs} = Bland.Polar.circle(r, samples)
+        line(acc, thetas, rs, stroke: stroke, stroke_width: sw)
+      end)
+
+    fig =
+      Enum.reduce(theta_ticks, fig, fn theta, acc ->
+        line(acc, [theta, theta], [0.0, rmax], stroke: stroke, stroke_width: sw)
+      end)
+
+    fig =
+      if with_labels? do
+        label_radius = rmax * 1.07
+
+        Enum.zip(theta_ticks, theta_ticks_deg)
+        |> Enum.reduce(fig, fn {theta, deg}, acc ->
+          annotate(acc,
+            text: "#{deg}°",
+            at: {theta, label_radius},
+            anchor: "middle",
+            font_size: 9
+          )
+        end)
+      else
+        fig
+      end
+
+    if with_r_labels? do
+      Enum.reduce(r_ticks, fig, fn r, acc ->
+        annotate(acc, text: Bland.Ticks.format(r), at: {0.0, r},
+          anchor: "start", font_size: 8)
+      end)
+    else
+      fig
+    end
+  end
+
+  defp default_r_ticks(rmax) do
+    step = rmax / 4
+    Enum.map(1..4, fn i -> i * step end)
+  end
+
+  @doc """
+  Creates a Smith chart figure — a unit-disk canvas for plotting
+  reflection coefficients `Γ` in RF / microwave work.
+
+  The returned figure has no standard axes, a circular clip to `|Γ|
+  ≤ 1`, and a square canvas. Pair with `smith_grid/2` for the
+  classical grid of constant-resistance circles and constant-reactance
+  arcs.
+
+      Bland.smith_figure(title: "S₁₁")
+      |> Bland.smith_grid()
+      |> Bland.line(gamma_real, gamma_imag, label: "sweep")
+
+  Convert impedance values to Γ via `Bland.Smith.gamma_from_z/1`.
+
+  ## Options
+
+    * `:size` — canvas size; defaults to `:square`
+    * All other figure options are forwarded.
+  """
+  @spec smith_figure(keyword()) :: Figure.t()
+  def smith_figure(opts \\ []) do
+    size = Keyword.get(opts, :size, :square)
+
+    defaults = [
+      size: size,
+      xlim: {-1.08, 1.08},
+      ylim: {-1.08, 1.08},
+      grid: :none,
+      clip: :circle,
+      axes: :none
+    ]
+
+    figure(Keyword.merge(defaults, opts))
+  end
+
+  @doc """
+  Adds the classical Smith chart grid to a figure: constant-resistance
+  circles (`r = 0.2, 0.5, 1, 2, 5` by default), constant-reactance arcs
+  (at `±0.2, ±0.5, ±1, ±2, ±5`), plus the unit circle boundary and the
+  real axis.
+
+  ## Options
+
+    * `:r_values`     — list of normalized resistances for the
+      R-circles (default `Bland.Smith.default_r_values/0`)
+    * `:x_values`     — list of normalized reactance magnitudes;
+      each also draws its negative counterpart
+      (default `Bland.Smith.default_x_values/0`)
+    * `:stroke`       — grid dash preset (default `:dotted`)
+    * `:stroke_width` — (default `0.4`)
+    * `:boundary_stroke_width` — weight of the unit circle and real
+      axis (default `0.8`)
+    * `:labels`       — `true` to annotate each R circle and X arc
+      (default `true`)
+    * `:samples`      — points per circle (default `120`)
+  """
+  @spec smith_grid(Figure.t(), keyword()) :: Figure.t()
+  def smith_grid(%Figure{} = fig, opts \\ []) do
+    r_values = Keyword.get(opts, :r_values, Bland.Smith.default_r_values())
+    x_values = Keyword.get(opts, :x_values, Bland.Smith.default_x_values())
+    stroke = Keyword.get(opts, :stroke, :dotted)
+    sw = Keyword.get(opts, :stroke_width, 0.4)
+    boundary_sw = Keyword.get(opts, :boundary_stroke_width, 0.8)
+    samples = Keyword.get(opts, :samples, 120)
+    with_labels? = Keyword.get(opts, :labels, true)
+
+    # Unit circle boundary (|Γ| = 1)
+    {ubx, uby} = trace_unit_circle(samples)
+    fig = line(fig, ubx, uby, stroke: :solid, stroke_width: boundary_sw)
+
+    # Real axis inside the disk (horizontal line)
+    fig = line(fig, [-1.0, 1.0], [0.0, 0.0], stroke: :solid, stroke_width: boundary_sw)
+
+    # Constant-R circles
+    fig =
+      Enum.reduce(r_values, fig, fn r, acc ->
+        {xs, ys} = Bland.Smith.r_circle(r, samples)
+        line(acc, xs, ys, stroke: stroke, stroke_width: sw)
+      end)
+
+    # Constant-X arcs (both ± signs). The clip handles the non-disk portions.
+    fig =
+      Enum.reduce(x_values, fig, fn x_mag, acc ->
+        {xs_pos, ys_pos} = Bland.Smith.x_arc(x_mag, samples)
+        {xs_neg, ys_neg} = Bland.Smith.x_arc(-x_mag, samples)
+
+        acc
+        |> line(xs_pos, ys_pos, stroke: stroke, stroke_width: sw)
+        |> line(xs_neg, ys_neg, stroke: stroke, stroke_width: sw)
+      end)
+
+    if with_labels?, do: add_smith_labels(fig, r_values, x_values), else: fig
+  end
+
+  defp trace_unit_circle(n) do
+    step = 2 * :math.pi() / n
+
+    Enum.map(0..n, fn i ->
+      phi = i * step
+      {:math.cos(phi), :math.sin(phi)}
+    end)
+    |> Enum.unzip()
+  end
+
+  defp add_smith_labels(fig, r_values, x_values) do
+    # R labels: where each R-circle meets the real axis (right side).
+    # On a constant-R circle with center (r/(r+1), 0), the right-most
+    # point is (r/(r+1) + 1/(r+1), 0) = (1, 0) for all R — not useful.
+    # The LEFT-most point is ((r-1)/(r+1), 0), which is distinct.
+    fig =
+      Enum.reduce(r_values, fig, fn r, acc ->
+        x_pos = (r - 1) / (r + 1)
+
+        annotate(acc,
+          text: Bland.Ticks.format(r),
+          at: {x_pos, 0.0},
+          anchor: "middle",
+          font_size: 7
+        )
+      end)
+
+    # X labels: place at the top/bottom of each X-arc's intersection
+    # with the unit circle. For X = x_mag, the unit-circle intersection
+    # other than (1, 0) is:
+    #   Γ_re = (x² - 1)/(x² + 1), Γ_im = 2x/(x² + 1)
+    Enum.reduce(x_values, fig, fn x_mag, acc ->
+      denom = x_mag * x_mag + 1
+      gre = (x_mag * x_mag - 1) / denom
+      gim_top = 2 * x_mag / denom
+      gim_bot = -gim_top
+
+      acc
+      |> annotate(text: "+#{Bland.Ticks.format(x_mag)}",
+           at: {gre, gim_top * 1.05},
+           anchor: "middle", font_size: 7)
+      |> annotate(text: "−#{Bland.Ticks.format(x_mag)}",
+           at: {gre, gim_bot * 1.05},
+           anchor: "middle", font_size: 7)
+    end)
+  end
 
   @doc """
   Sets axis options on a figure.
@@ -191,6 +454,276 @@ defmodule Bland do
   @spec polygon(Figure.t(), [number()], [number()], keyword()) :: Figure.t()
   def polygon(%Figure{} = fig, xs, ys, opts \\ []) do
     Figure.add_series(fig, struct(Series.Polygon, [xs: xs, ys: ys] ++ opts))
+  end
+
+  @doc """
+  Adds an error-bar series — data points with X and/or Y uncertainty
+  whiskers.
+
+  `yerr`/`xerr` accept either a list of symmetric half-widths or a list
+  of `{lower, upper}` tuples for asymmetric error.
+
+  ## Options
+
+    * `:yerr`       — symmetric or asymmetric y-error per point
+    * `:xerr`       — same for x
+    * `:marker`     — marker at each point (default `:circle_filled`;
+      set `nil` to suppress)
+    * `:marker_size`, `:cap_width`, `:stroke_width`, `:label`
+
+  ## Examples
+
+      Bland.errorbar(fig, xs, ys, yerr: sigmas, label: "±1σ")
+      Bland.errorbar(fig, xs, ys, yerr: Enum.zip(lower, upper))
+      Bland.errorbar(fig, xs, ys, yerr: yerr, xerr: xerr)
+  """
+  @spec errorbar(Figure.t(), [number()], [number()], keyword()) :: Figure.t()
+  def errorbar(%Figure{} = fig, xs, ys, opts \\ []) do
+    Figure.add_series(fig, struct(Series.ErrorBar, [xs: xs, ys: ys] ++ opts))
+  end
+
+  @doc """
+  Adds a box-and-whisker summary. `categories_and_samples` pairs each
+  category label with a list of raw observations; BLAND computes the
+  quartiles, Tukey-fence whiskers, and outliers for you via
+  `Bland.Stats.boxplot_stats/2`.
+
+  ## Options
+
+    * `:label`      — legend text
+    * `:hatch`      — IQR box fill (default cycles)
+    * `:box_width`  — width fraction of the category slot (default `0.6`)
+    * `:stroke_width`
+
+  ## Example
+
+      Bland.boxplot(fig, [
+        {"control", control_samples},
+        {"treated", treated_samples}
+      ], label: "distribution")
+  """
+  @spec boxplot(Figure.t(), [{String.t(), [number()]}], keyword()) :: Figure.t()
+  def boxplot(%Figure{} = fig, categories_and_samples, opts \\ []) do
+    {cats, samples_lists} = Enum.unzip(categories_and_samples)
+    stats = Enum.map(samples_lists, &Bland.Stats.boxplot_stats/1)
+
+    Figure.add_series(fig, struct(Series.BoxPlot,
+      [categories: cats, stats: stats] ++ opts
+    ))
+  end
+
+  @doc """
+  Adds a stem-plot series — the discrete-signal staple from DSP.
+
+  Each point renders as a vertical line from `:baseline` (default `0`)
+  up to `(x, y)`, with a marker at the tip.
+
+  ## Options
+
+    * `:baseline`, `:marker` (default `:circle_filled`), `:marker_size`,
+      `:stroke`, `:stroke_width`, `:label`
+  """
+  @spec stem(Figure.t(), [number()], [number()], keyword()) :: Figure.t()
+  def stem(%Figure{} = fig, xs, ys, opts \\ []) do
+    Figure.add_series(fig, struct(Series.Stem, [xs: xs, ys: ys] ++ opts))
+  end
+
+  @doc """
+  Adds contour (iso-level) curves over a 2D scalar grid.
+
+  ## Options
+
+    * `:levels`  — list of scalar values at which to draw contours
+      (default: 7 evenly-spaced levels across the data range)
+    * `:x_edges`, `:y_edges` — cell boundaries (default `0..cols`, `0..rows`)
+    * `:origin`  — `:bottom_left` (default) or `:top_left`
+    * `:stroke`  — dash preset (default `:solid`). Negative levels
+      render dashed automatically to convey sign.
+    * `:stroke_width`, `:label`
+
+  ## Example
+
+      grid =
+        for j <- -20..20, do: (for i <- -20..20, do: :math.sin(i * 0.2) * :math.cos(j * 0.2))
+
+      Bland.contour(fig, grid,
+        x_edges: Enum.map(-20..21, &(&1 * 0.1)),
+        y_edges: Enum.map(-20..21, &(&1 * 0.1)),
+        levels: [-0.8, -0.4, 0, 0.4, 0.8])
+  """
+  @spec contour(Figure.t(), [[number()]], keyword()) :: Figure.t()
+  def contour(%Figure{} = fig, grid, opts \\ []) when is_list(grid) do
+    rows = length(grid)
+    cols = if rows > 0, do: length(List.first(grid)), else: 0
+
+    x_edges = Keyword.get(opts, :x_edges, Enum.map(0..cols, &(&1 * 1.0)))
+    y_edges = Keyword.get(opts, :y_edges, Enum.map(0..rows, &(&1 * 1.0)))
+    levels = Keyword.get(opts, :levels, default_contour_levels(grid))
+    remaining = Keyword.drop(opts, [:x_edges, :y_edges, :levels])
+
+    Figure.add_series(fig, struct(Series.Contour,
+      [data: grid, x_edges: x_edges, y_edges: y_edges, levels: levels] ++ remaining
+    ))
+  end
+
+  defp default_contour_levels(grid) do
+    {lo, hi} = Bland.Heatmap.extent(grid)
+    step = (hi - lo) / 8
+    Enum.map(1..7, fn i -> lo + i * step end)
+  end
+
+  @doc """
+  Adds a vector-field (quiver) series. Each `(xs[i], ys[i])` gets an
+  arrow with components `(us[i], vs[i])`.
+
+  ## Options
+
+    * `:scale`     — multiply each vector before drawing (default `1.0`)
+    * `:head_size` — arrow-head pixel length (default `6`)
+    * `:stroke`, `:stroke_width`, `:label`
+  """
+  @spec quiver(Figure.t(), [number()], [number()], [number()], [number()], keyword()) ::
+          Figure.t()
+  def quiver(%Figure{} = fig, xs, ys, us, vs, opts \\ []) do
+    Figure.add_series(fig, struct(Series.Quiver,
+      [xs: xs, ys: ys, us: us, vs: vs] ++ opts
+    ))
+  end
+
+  @doc """
+  Adds a Q-Q (quantile-quantile) plot — sample quantiles vs theoretical
+  quantiles of a named distribution, with a `y = x` reference line.
+
+  ## Options
+
+    * `:distribution` — `:normal` (default). Other distributions can
+      be added later.
+    * `:reference`    — `true` (default) to draw the y=x reference line
+    * `:marker`       — default `:circle_open`
+    * `:marker_size`, `:label`
+
+  ## Example
+
+      Bland.qq_plot(fig, samples, label: "residuals")
+  """
+  @spec qq_plot(Figure.t(), [number()], keyword()) :: Figure.t()
+  def qq_plot(%Figure{} = fig, samples, opts \\ []) do
+    dist = Keyword.get(opts, :distribution, :normal)
+    ref? = Keyword.get(opts, :reference, true)
+    marker = Keyword.get(opts, :marker, :circle_open)
+    remaining = Keyword.drop(opts, [:distribution, :reference, :marker])
+
+    sorted = Enum.sort(samples)
+    n = length(sorted)
+
+    theoretical =
+      Enum.map(1..n, fn k ->
+        p = (k - 0.5) / n
+        theoretical_quantile(dist, p)
+      end)
+
+    fig =
+      scatter(fig, theoretical, sorted,
+        [marker: marker] ++ remaining
+      )
+
+    if ref? do
+      {lo, hi} = Enum.min_max(theoretical ++ sorted)
+      line(fig, [lo, hi], [lo, hi], stroke: :dashed)
+    else
+      fig
+    end
+  end
+
+  defp theoretical_quantile(:normal, p), do: Bland.Stats.normal_quantile(p)
+
+  defp theoretical_quantile(other, _),
+    do: raise(ArgumentError, "unsupported distribution #{inspect(other)}")
+
+  @doc """
+  Renders a Bode plot — magnitude (dB, log-linear) on top, phase
+  (degrees, log-linear) on the bottom — as a two-panel SVG.
+
+  `omegas` is a list of angular frequencies (or just frequencies — they
+  just become x-coordinates on a log axis). Pass either:
+
+    * Pre-computed `{mag_db, phase_deg}` lists, OR
+    * A transfer-function callback `fn ω -> {real, imag} end` returning
+      the complex value of `H(jω)` at each frequency.
+
+  Returns an SVG binary ready to write or embed.
+
+  ## Options
+
+    * `:cell_width`, `:cell_height` — per-panel size
+    * `:title`                      — outer title
+    * `:xlabel`                     — frequency axis label (default `"ω"`)
+    * `:mag_label`                  — magnitude y-axis label (default `"|H| [dB]"`)
+    * `:phase_label`                — phase y-axis label (default `"∠H [°]"`)
+    * `:theme`                      — passed through to both panels
+
+  ## Examples
+
+      # From precomputed magnitude and phase
+      Bland.bode(omegas, mag_db, phase_deg)
+
+      # From a transfer-function callback: H(s) = 1 / (1 + s/10) evaluated
+      # at s = jω
+      Bland.bode(omegas, fn omega ->
+        {1 / (1 + omega * omega / 100), -omega / (10 + omega * omega / 10)}
+      end)
+  """
+  @spec bode([number()], [number()] | function(), [number()] | keyword(), keyword()) ::
+          String.t()
+  def bode(omegas, mag_or_tf, phase_or_opts \\ [], opts \\ [])
+
+  def bode(omegas, tf, opts, _extra) when is_function(tf, 1) do
+    {mags_db, phases_deg} =
+      omegas
+      |> Enum.map(fn w ->
+        {re, im} = tf.(w)
+        mag = :math.sqrt(re * re + im * im)
+        mag_db = 20 * :math.log10(max(mag, 1.0e-300))
+        phase_deg = :math.atan2(im, re) * 180 / :math.pi()
+        {mag_db, phase_deg}
+      end)
+      |> Enum.unzip()
+
+    build_bode_grid(omegas, mags_db, phases_deg, opts)
+  end
+
+  def bode(omegas, mag_db, phase_deg, opts)
+      when is_list(mag_db) and is_list(phase_deg) do
+    build_bode_grid(omegas, mag_db, phase_deg, opts)
+  end
+
+  defp build_bode_grid(omegas, mag_db, phase_deg, opts) do
+    xlabel = Keyword.get(opts, :xlabel, "ω")
+    mag_label = Keyword.get(opts, :mag_label, "|H| [dB]")
+    phase_label = Keyword.get(opts, :phase_label, "∠H [°]")
+    title = Keyword.get(opts, :title)
+    cell_w = Keyword.get(opts, :cell_width, 900)
+    cell_h = Keyword.get(opts, :cell_height, 320)
+    theme = Keyword.get(opts, :theme, :report_1972)
+
+    xlim = {Enum.min(omegas), Enum.max(omegas)}
+
+    mag_fig =
+      figure(size: {cell_w, cell_h}, theme: theme, title: title)
+      |> axes(xlabel: xlabel, ylabel: mag_label, xscale: :log, xlim: xlim)
+      |> line(omegas, mag_db)
+
+    phase_fig =
+      figure(size: {cell_w, cell_h}, theme: theme)
+      |> axes(xlabel: xlabel, ylabel: phase_label, xscale: :log, xlim: xlim)
+      |> line(omegas, phase_deg)
+
+    grid([mag_fig, phase_fig],
+      columns: 1,
+      cell_width: cell_w,
+      cell_height: cell_h,
+      title: nil
+    )
   end
 
   @doc """
@@ -654,6 +1187,46 @@ defmodule Bland do
   @spec write!(Figure.t(), Path.t()) :: :ok
   def write!(%Figure{} = fig, path) do
     File.write!(path, to_svg(fig))
+  end
+
+  @doc """
+  Composes a list of figures into a single SVG with a grid layout.
+
+  This is how you build multi-panel figures — Bode plots, dashboards,
+  before/after comparisons — while getting a single printable SVG at
+  the end. Each panel renders independently: its own ticks, labels,
+  legend, ornaments.
+
+  See `Bland.Grid` for the full option list. Common options:
+
+    * `:columns`, `:rows` — grid shape
+    * `:cell_width`, `:cell_height` — pixel size of each cell
+    * `:gap`, `:padding` — spacing
+    * `:title` — outer title across all panels
+
+  ## Example
+
+      a = Bland.figure(title: "Before") |> Bland.line(xs, ys1)
+      b = Bland.figure(title: "After")  |> Bland.line(xs, ys2)
+
+      svg = Bland.grid([a, b], columns: 2, title: "Comparison")
+  """
+  @spec grid([Figure.t()], keyword()) :: String.t()
+  def grid(figures, opts \\ []), do: Bland.Grid.render(figures, opts)
+
+  @doc """
+  Like `grid/2`, but returns a `Kino.Image` for Livebook inline
+  display.
+  """
+  @spec grid_to_kino([Figure.t()], keyword()) :: any()
+  def grid_to_kino(figures, opts \\ []) do
+    svg = grid(figures, opts)
+
+    if Code.ensure_loaded?(Kino.Image) do
+      apply(Kino.Image, :new, [svg, "image/svg+xml"])
+    else
+      raise "Bland.grid_to_kino/2 requires :kino"
+    end
   end
 
   @doc """

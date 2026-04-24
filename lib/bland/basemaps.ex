@@ -2,6 +2,10 @@ defmodule Bland.Basemaps do
   @moduledoc """
   Static base-layer data for geographic figures.
 
+  ![World basemap](assets/hero_world.svg)
+
+  ![Lunar near side](assets/hero_moon.svg)
+
   BLAND ships a hand-curated, low-resolution set of cartographic
   outlines suitable for schematic maps in the tradition of 1960s–80s
   technical reports. The data is embedded in the library — no downloads,

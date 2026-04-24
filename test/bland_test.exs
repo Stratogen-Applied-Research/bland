@@ -5,6 +5,9 @@ defmodule BlandTest do
   doctest Bland.Histogram
   doctest Bland.Heatmap
   doctest Bland.Geo
+  doctest Bland.Polar
+  doctest Bland.Smith
+  doctest Bland.Stats
 
   describe "figure/1" do
     test "builds a default letter-landscape figure" do
@@ -420,6 +423,362 @@ defmodule BlandTest do
       assert svg =~ "url(#bland-pattern-diagonal)"
       # Colorbar labels should appear
       assert svg =~ "intensity"
+    end
+  end
+
+  describe "Bland.Stats" do
+    test "quantile linear interpolation at 0.5 returns median" do
+      assert Bland.Stats.quantile([1, 2, 3, 4, 5], 0.5) == 3.0
+      assert Bland.Stats.quantile([1, 2, 3, 4], 0.5) == 2.5
+    end
+
+    test "boxplot_stats separates inliers from Tukey-fence outliers" do
+      s = Bland.Stats.boxplot_stats([1, 2, 3, 4, 5, 6, 7, 100])
+      assert 100 in s.outliers
+      assert s.max <= 7.0
+    end
+
+    test "normal_quantile round-trip — p=0.5 is 0, p=0.975 ≈ 1.96" do
+      assert abs(Bland.Stats.normal_quantile(0.5)) < 1.0e-9
+      assert_in_delta Bland.Stats.normal_quantile(0.975), 1.96, 1.0e-3
+      assert_in_delta Bland.Stats.normal_quantile(0.025), -1.96, 1.0e-3
+    end
+  end
+
+  describe "errorbar/4" do
+    test "adds an ErrorBar series" do
+      fig = Bland.figure() |> Bland.errorbar([1, 2, 3], [1, 4, 9], yerr: [0.5, 0.5, 0.5])
+      assert [%Bland.Series.ErrorBar{yerr: [0.5, 0.5, 0.5]}] = fig.series
+    end
+
+    test "renders whiskers with caps" do
+      svg =
+        Bland.figure()
+        |> Bland.errorbar([1, 2], [10, 20], yerr: [1, 2], marker: :circle_filled)
+        |> Bland.to_svg()
+
+      # Each point: 1 stem + 2 caps = 3 lines, × 2 points = 6 lines, + 2 markers
+      line_count = svg |> String.split("<line") |> length() |> Kernel.-(1)
+      assert line_count >= 6
+    end
+
+    test "y-extent accounts for whisker endpoints" do
+      fig = Bland.figure() |> Bland.errorbar([1, 2], [0.0, 0.0], yerr: [5.0, 5.0])
+      svg = Bland.to_svg(fig)
+      # With no explicit ylim, auto_domain should extend beyond ±5
+      assert is_binary(svg)
+    end
+
+    test "asymmetric {lo, hi} errors are accepted" do
+      fig =
+        Bland.figure()
+        |> Bland.errorbar([1, 2], [10, 10], yerr: [{1, 3}, {2, 4}])
+
+      assert [%Bland.Series.ErrorBar{yerr: [{1, 3}, {2, 4}]}] = fig.series
+    end
+  end
+
+  describe "boxplot/3" do
+    test "computes stats from raw samples" do
+      fig =
+        Bland.figure()
+        |> Bland.boxplot([{"A", Enum.to_list(1..20)}, {"B", Enum.to_list(5..25)}])
+
+      [%Bland.Series.BoxPlot{categories: ["A", "B"], stats: [sa, sb]}] = fig.series
+      assert sa.median == 10.5
+      assert sb.median == 15.0
+    end
+
+    test "renders box, median, whiskers, caps, outliers for each category" do
+      svg =
+        Bland.figure()
+        |> Bland.boxplot([{"A", [1, 2, 3, 4, 5, 100]}], label: "A")
+        |> Bland.to_svg()
+
+      # 1 box rect + several lines + 1 outlier circle (for 100)
+      assert svg =~ "<rect"
+      assert svg =~ "<circle"
+    end
+  end
+
+  describe "stem/4" do
+    test "adds a Stem series" do
+      fig = Bland.figure() |> Bland.stem([0, 1, 2], [1, 2, 3])
+      assert [%Bland.Series.Stem{xs: [0, 1, 2], ys: [1, 2, 3]}] = fig.series
+    end
+
+    test "renders n stems with n markers" do
+      svg =
+        Bland.figure()
+        |> Bland.stem([0, 1, 2, 3], [0.5, 1.0, -0.5, 0.2])
+        |> Bland.to_svg()
+
+      assert svg =~ "<line"
+      assert svg =~ "<circle"
+    end
+  end
+
+  describe "contour/3" do
+    test "picks default levels from data range" do
+      grid = for j <- 0..9, do: (for i <- 0..9, do: i + j)
+      fig = Bland.figure() |> Bland.contour(grid)
+      [%Bland.Series.Contour{levels: levels}] = fig.series
+      assert length(levels) == 7
+    end
+
+    test "marching squares produces line segments at each level" do
+      grid = for j <- 0..9, do: (for i <- 0..9, do: i * 1.0 - j * 1.0)
+      svg =
+        Bland.figure()
+        |> Bland.contour(grid, levels: [-5.0, 0.0, 5.0])
+        |> Bland.to_svg()
+
+      # Each level crosses many cells, so many <line> elements
+      line_count = svg |> String.split("<line") |> length() |> Kernel.-(1)
+      assert line_count > 10
+    end
+  end
+
+  describe "quiver/6" do
+    test "adds a Quiver series" do
+      fig =
+        Bland.figure()
+        |> Bland.quiver([0, 1], [0, 1], [1, -1], [1, 1])
+
+      assert [%Bland.Series.Quiver{xs: [0, 1], us: [1, -1]}] = fig.series
+    end
+
+    test "renders n arrows as line + polygon pairs" do
+      svg =
+        Bland.figure()
+        |> Bland.quiver([0, 1, 2], [0, 0, 0], [0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
+        |> Bland.to_svg()
+
+      assert svg =~ "<line"
+      assert svg =~ "<polygon"
+    end
+  end
+
+  describe "qq_plot/3" do
+    test "adds scatter + reference line for normal distribution" do
+      samples = Enum.map(1..50, fn i -> i / 10.0 end)
+
+      fig =
+        Bland.figure()
+        |> Bland.qq_plot(samples, distribution: :normal)
+
+      # Scatter (50 points) + reference line
+      assert Enum.any?(fig.series, &match?(%Bland.Series.Scatter{}, &1))
+      assert Enum.any?(fig.series, &match?(%Bland.Series.Line{}, &1))
+    end
+
+    test "reference: false suppresses the y=x line" do
+      fig =
+        Bland.figure()
+        |> Bland.qq_plot([1.0, 2.0, 3.0], reference: false)
+
+      refute Enum.any?(fig.series, &match?(%Bland.Series.Line{}, &1))
+    end
+  end
+
+  describe "bode/4" do
+    test "from precomputed magnitude + phase lists produces an SVG" do
+      omegas = [1.0, 10.0, 100.0]
+      mag = [0.0, -3.0, -40.0]
+      phase = [-5.0, -45.0, -85.0]
+
+      svg = Bland.bode(omegas, mag, phase, title: "Test")
+      assert String.starts_with?(svg, "<?xml")
+      assert svg =~ "|H| [dB]"
+      assert svg =~ "∠H [°]"
+    end
+
+    test "transfer-function callback form works" do
+      omegas = Enum.map(-10..20, fn k -> :math.pow(10, k / 10.0) end)
+      tf = fn w -> {1 / (1 + w * w), -w / (1 + w * w)} end
+
+      svg = Bland.bode(omegas, tf)
+      assert String.starts_with?(svg, "<?xml")
+    end
+  end
+
+  describe "grid/2 (subplots)" do
+    test "composes multiple figures into one SVG" do
+      a = Bland.figure(size: {400, 300}) |> Bland.line([1, 2, 3], [1, 4, 9])
+      b = Bland.figure(size: {400, 300}) |> Bland.line([1, 2, 3], [3, 2, 1])
+
+      svg = Bland.grid([a, b], columns: 2)
+      # Two nested <svg> wrappers for the panels + outer one
+      assert (svg |> String.split("<svg") |> length()) >= 3
+    end
+
+    test "outer title is rendered" do
+      fig = Bland.figure(size: {300, 200}) |> Bland.line([1, 2], [1, 2])
+      svg = Bland.grid([fig], title: "Outer title")
+      assert svg =~ "Outer title"
+    end
+  end
+
+  describe "Bland.Polar" do
+    test "project θ=0, r=1 lands on positive x-axis" do
+      {x, y} = Bland.Polar.project({0.0, 1.0})
+      assert_in_delta x, 1.0, 1.0e-9
+      assert_in_delta y, 0.0, 1.0e-9
+    end
+
+    test "project θ=π/2 rotates to positive y-axis" do
+      {x, y} = Bland.Polar.project({:math.pi() / 2, 2.0})
+      assert_in_delta x, 0.0, 1.0e-9
+      assert_in_delta y, 2.0, 1.0e-9
+    end
+
+    test "from_xy is inverse of project" do
+      for {theta_in, r_in} <- [{0.3, 1.7}, {-0.5, 0.9}, {2.8, 3.1}] do
+        {x, y} = Bland.Polar.project({theta_in, r_in})
+        {theta_out, r_out} = Bland.Polar.from_xy({x, y})
+        assert_in_delta r_out, r_in, 1.0e-9
+        assert_in_delta theta_out, theta_in, 1.0e-9
+      end
+    end
+
+    test "circle/2 returns a closed set of equal-radius points" do
+      {thetas, rs} = Bland.Polar.circle(0.7, 60)
+      assert length(thetas) == 61
+      assert length(rs) == 61
+      assert Enum.all?(rs, &(&1 == 0.7))
+    end
+  end
+
+  describe "polar_figure/1" do
+    test "sets :polar projection, circular clip, and disables axes" do
+      fig = Bland.polar_figure(rmax: 1.5)
+      assert fig.projection == :polar
+      assert fig.clip == :circle
+      assert fig.axes == :none
+      assert fig.xlim == {-1.5, 1.5}
+      assert fig.ylim == {-1.5, 1.5}
+      assert fig.grid == :none
+    end
+
+    test "polar_grid/2 adds reference circles + radial lines + labels" do
+      fig = Bland.polar_figure() |> Bland.polar_grid(r_ticks: [0.5, 1.0], theta_step: 90)
+
+      # 2 concentric circles + 4 radial lines = 6 Line series
+      line_count =
+        Enum.count(fig.series, &match?(%Bland.Series.Line{}, &1))
+
+      assert line_count == 6
+      # 4 angle labels (0°, 90°, 180°, 270°)
+      assert length(fig.annotations) == 4
+    end
+
+    test "renders a polar plot with clipping to the unit disk" do
+      thetas = Enum.map(0..360, fn d -> d * :math.pi() / 180 end)
+      rs = Enum.map(thetas, &(0.5 * (1 + :math.cos(&1))))
+
+      svg =
+        Bland.polar_figure()
+        |> Bland.polar_grid()
+        |> Bland.line(thetas, rs)
+        |> Bland.to_svg()
+
+      # Circular clip path is used
+      assert svg =~ "<clipPath"
+      assert svg =~ "<circle"
+    end
+  end
+
+  describe "Bland.Smith" do
+    test "gamma_from_z matches known impedances" do
+      # Matched load Z=1 → Γ=0
+      assert_gamma(Bland.Smith.gamma_from_z({1.0, 0.0}), 0.0, 0.0)
+      # Short Z=0 → Γ=-1
+      assert_gamma(Bland.Smith.gamma_from_z({0.0, 0.0}), -1.0, 0.0)
+      # Pure reactance Z = j → |Γ| = 1 (all reflection)
+      {gr, gi} = Bland.Smith.gamma_from_z({0.0, 1.0})
+      assert_in_delta :math.sqrt(gr * gr + gi * gi), 1.0, 1.0e-9
+    end
+
+    test "z_from_gamma is inverse of gamma_from_z" do
+      for {r, x} <- [{0.5, 0.0}, {2.0, -0.3}, {1.0, 1.5}] do
+        gamma = Bland.Smith.gamma_from_z({r, x})
+        {r_out, x_out} = Bland.Smith.z_from_gamma(gamma)
+        assert_in_delta r_out, r, 1.0e-9
+        assert_in_delta x_out, x, 1.0e-9
+      end
+    end
+
+    test "r_circle for any r is tangent to the unit disk at (1, 0)" do
+      for r <- [0.2, 0.5, 1.0, 2.0, 5.0] do
+        {xs, ys} = Bland.Smith.r_circle(r, 120)
+
+        # Max distance from origin should equal 1 (tangent)
+        max_dist =
+          Enum.zip(xs, ys)
+          |> Enum.map(fn {x, y} -> :math.sqrt(x * x + y * y) end)
+          |> Enum.max()
+
+        assert_in_delta max_dist, 1.0, 1.0e-4
+      end
+    end
+
+    test "x_arc for any x passes through (1, 0)" do
+      for x <- [0.2, 0.5, 1.0, 2.0, -0.5] do
+        {xs, ys} = Bland.Smith.x_arc(x, 120)
+
+        min_dist_to_10 =
+          Enum.zip(xs, ys)
+          |> Enum.map(fn {gx, gy} -> :math.sqrt((gx - 1) * (gx - 1) + gy * gy) end)
+          |> Enum.min()
+
+        assert_in_delta min_dist_to_10, 0.0, 1.0e-4
+      end
+    end
+
+    test "default values are populated" do
+      assert is_list(Bland.Smith.default_r_values())
+      assert length(Bland.Smith.default_r_values()) > 0
+      assert length(Bland.Smith.default_x_values()) > 0
+    end
+
+    defp assert_gamma({gr, gi}, ex_gr, ex_gi) do
+      assert_in_delta gr, ex_gr, 1.0e-9
+      assert_in_delta gi, ex_gi, 1.0e-9
+    end
+  end
+
+  describe "smith_figure/1" do
+    test "sets up a unit-disk figure with circular clip and no axes" do
+      fig = Bland.smith_figure()
+      assert fig.clip == :circle
+      assert fig.axes == :none
+      assert fig.grid == :none
+    end
+
+    test "smith_grid/2 draws R circles + X arcs + unit circle + real axis" do
+      fig = Bland.smith_figure() |> Bland.smith_grid()
+
+      # 5 R-circles + 10 X-arcs (±5 mags) + 1 unit circle + 1 real axis = 17 Line series
+      line_count = Enum.count(fig.series, &match?(%Bland.Series.Line{}, &1))
+      assert line_count == 17
+    end
+
+    test "smith_grid/2 with custom r/x values" do
+      fig = Bland.smith_figure() |> Bland.smith_grid(r_values: [1.0], x_values: [1.0])
+      # 1 R + 2 X (±1) + 1 unit + 1 real axis = 5
+      assert Enum.count(fig.series, &match?(%Bland.Series.Line{}, &1)) == 5
+    end
+
+    test "end-to-end render produces valid SVG with circular clip" do
+      svg =
+        Bland.smith_figure()
+        |> Bland.smith_grid()
+        |> Bland.scatter([0.2, -0.3], [0.1, 0.4], marker: :cross)
+        |> Bland.to_svg()
+
+      assert svg =~ "<clipPath"
+      assert svg =~ ~s|<circle cx|
+      assert String.starts_with?(svg, "<?xml")
     end
   end
 

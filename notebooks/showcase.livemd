@@ -184,6 +184,228 @@ Bland.figure(size: :a5_landscape, title: "Figure 4c — density + CDF")
 |> Bland.to_kino()
 ```
 
+## 4d. Polar plots
+
+`Bland.polar_figure/1` sets up a square canvas with a `:polar`
+projection (each `{θ, r}` point gets mapped to `(r·cos θ, r·sin θ)`)
+and a circular clip. `Bland.polar_grid/2` lays down the concentric
+reference rings and radial lines.
+
+Pass `θ` in radians.
+
+```elixir
+thetas = Enum.map(0..360, fn d -> d * :math.pi() / 180 end)
+cardioid = Enum.map(thetas, fn t -> 0.5 * (1 + :math.cos(t)) end)
+lobes = Enum.map(thetas, fn t -> abs(:math.cos(3 * t)) * 0.9 end)
+
+Bland.polar_figure(size: {640, 640}, rmax: 1.0,
+  title: "Figure 4d — polar plot")
+|> Bland.polar_grid(r_ticks: [0.25, 0.5, 0.75, 1.0], theta_step: 30)
+|> Bland.line(thetas, cardioid, stroke: :solid, label: "cardioid")
+|> Bland.line(thetas, lobes, stroke: :dashed, label: "|cos 3θ|")
+|> Bland.legend(position: :top_right)
+|> Bland.to_kino()
+```
+
+## 4e. Smith charts
+
+`Bland.smith_figure/1` creates a unit-disk canvas for plotting
+reflection coefficients `Γ = (Z − 1) / (Z + 1)`. `Bland.smith_grid/2`
+draws the classical grid: constant-resistance circles at `r = 0.2,
+0.5, 1, 2, 5`, constant-reactance arcs at `x = ±0.2, ±0.5, ±1, ±2,
+±5`, plus the unit-circle boundary and real axis.
+
+```elixir
+Bland.smith_figure(size: {640, 640}, title: "Figure 4e — Smith chart (grid)")
+|> Bland.smith_grid()
+|> Bland.to_kino()
+```
+
+Plot your own S₁₁ by converting normalized impedances to `Γ` via
+`Bland.Smith.gamma_from_z/1`:
+
+```elixir
+# Simulated broadband impedance sweep
+gammas =
+  for i <- 0..60 do
+    t = i / 60.0
+    r = 0.5 + 1.5 * t
+    x = :math.sin(t * 3.0 * :math.pi()) * 0.8
+    Bland.Smith.gamma_from_z({r, x})
+  end
+
+{gx, gy} = Enum.unzip(gammas)
+
+Bland.smith_figure(size: {720, 720}, title: "S₁₁ sweep")
+|> Bland.smith_grid()
+|> Bland.line(gx, gy, stroke: :solid, stroke_width: 1.5, label: "S₁₁")
+|> Bland.scatter([List.first(gx)], [List.first(gy)],
+     marker: :circle_filled, marker_size: 5, label: "start")
+|> Bland.scatter([List.last(gx)], [List.last(gy)],
+     marker: :cross, marker_size: 6, label: "end")
+|> Bland.legend(position: :bottom_right)
+|> Bland.to_kino()
+```
+
+## 4f. Error bars
+
+Scatter-style data with Y uncertainty whiskers. `yerr` takes symmetric
+half-widths or asymmetric `{lo, hi}` tuples per point. `xerr` is
+supported too.
+
+```elixir
+:rand.seed(:exsss, {11, 22, 33})
+xs = Enum.to_list(1..10)
+ys = Enum.map(xs, fn x -> 0.5 * x + (:rand.uniform() - 0.5) end)
+yerr = Enum.map(xs, fn _ -> 0.2 + :rand.uniform() * 0.3 end)
+
+Bland.figure(size: :a5_landscape, title: "Figure 4f — error bars")
+|> Bland.axes(xlabel: "x", ylabel: "y")
+|> Bland.errorbar(xs, ys, yerr: yerr, label: "y ± σ")
+|> Bland.legend(position: :top_left)
+|> Bland.to_kino()
+```
+
+## 4g. Box plots
+
+Pass raw observations per category; BLAND computes quartiles, Tukey-
+fence whiskers, and outliers via `Bland.Stats.boxplot_stats/2`.
+
+```elixir
+control = Enum.map(1..100, fn _ -> :rand.normal(0, 1) end)
+treated = Enum.map(1..100, fn _ -> :rand.normal(1.2, 1.1) end)
+
+Bland.figure(size: :a5_landscape, title: "Figure 4g — box plot")
+|> Bland.axes(ylabel: "response")
+|> Bland.boxplot(
+     [{"control", control}, {"treated", treated}],
+     hatch: :diagonal, label: "n=100")
+|> Bland.legend(position: :top_left)
+|> Bland.to_kino()
+```
+
+## 4h. Contour plots
+
+Marching squares on a 2D scalar grid at requested levels. Negative
+levels render dashed automatically (so sign is readable in a
+photocopy).
+
+```elixir
+grid =
+  for j <- -20..20, into: [] do
+    for i <- -20..20, into: [] do
+      :math.sin(i * 0.2) * :math.cos(j * 0.2)
+    end
+  end
+
+Bland.figure(size: :square, title: "Figure 4h — contours")
+|> Bland.axes(xlabel: "x", ylabel: "y")
+|> Bland.contour(grid,
+     x_edges: Enum.map(-20..21, &(&1 * 0.1)),
+     y_edges: Enum.map(-20..21, &(&1 * 0.1)),
+     levels: [-0.8, -0.4, -0.1, 0.1, 0.4, 0.8])
+|> Bland.to_kino()
+```
+
+## 4i. Stem plots (DSP)
+
+Discrete-time signal staple: vertical line from baseline to each
+sample, with a marker at the tip.
+
+```elixir
+ns = Enum.to_list(0..20)
+vals = Enum.map(ns, fn n -> :math.cos(n * 0.5) * :math.exp(-n * 0.1) end)
+
+Bland.figure(size: :a5_landscape, title: "Figure 4i — stem plot")
+|> Bland.axes(xlabel: "n", ylabel: "x[n]")
+|> Bland.stem(ns, vals, label: "x[n]")
+|> Bland.hline(0.0, stroke: :solid, stroke_width: 0.5)
+|> Bland.legend(position: :top_right)
+|> Bland.to_kino()
+```
+
+## 4j. Quiver (vector field)
+
+Arrows at grid points. Classic for flow, EM, stress visualization.
+
+```elixir
+# Rotation field: (u, v) = (-y, x)
+qxs = for i <- -2..2, _ <- -2..2, do: i * 1.0
+qys = for _ <- -2..2, j <- -2..2, do: j * 1.0
+qus = Enum.map(qys, &(-&1 * 0.3))
+qvs = Enum.map(qxs, &(&1 * 0.3))
+
+Bland.figure(size: :square, title: "Figure 4j — rotation field")
+|> Bland.axes(xlabel: "x", ylabel: "y", xlim: {-3, 3}, ylim: {-3, 3})
+|> Bland.quiver(qxs, qys, qus, qvs)
+|> Bland.to_kino()
+```
+
+## 4k. Q-Q plot
+
+Sample quantiles vs theoretical (normal by default) with a y=x
+reference. If the samples are normal, points land on the diagonal.
+
+```elixir
+samples = Enum.map(1..200, fn _ -> :rand.normal(0, 1) end)
+
+Bland.figure(size: :a5_landscape, title: "Figure 4k — Q-Q normal")
+|> Bland.axes(xlabel: "theoretical quantile", ylabel: "sample quantile")
+|> Bland.qq_plot(samples, label: "n=200")
+|> Bland.legend(position: :top_left)
+|> Bland.to_kino()
+```
+
+## 4l. Bode plots
+
+Two-panel frequency response: magnitude (dB, log ω) + phase (°, log ω).
+Pass either precomputed arrays or a transfer-function callback
+`fn ω -> {real, imag} end`.
+
+```elixir
+omegas = Enum.map(-20..40, fn k -> :math.pow(10, k / 10.0) end)
+
+# First-order lowpass with ω_c = 10:
+#   H(jω) = 1 / (1 + jω/10)
+tf = fn w ->
+  denom = 1 + w * w / 100
+  {1 / denom, -(w / 10) / denom}
+end
+
+svg = Bland.bode(omegas, tf,
+  title: "Figure 4l — first-order lowpass",
+  xlabel: "ω [rad/s]")
+
+# Render directly as inline SVG
+Kino.Image.new(svg, "image/svg+xml")
+```
+
+## 4m. Subplots
+
+Compose independently-built figures into one SVG — any panel shape,
+any layout. This is how you build multi-panel reports.
+
+```elixir
+xs2 = Enum.map(0..100, &(&1 / 10.0))
+
+raw =
+  Bland.figure(size: {540, 300}, title: "Raw signal")
+  |> Bland.axes(xlabel: "t [s]", ylabel: "x(t)")
+  |> Bland.line(xs2, Enum.map(xs2, &(:math.cos(&1) + :math.sin(&1 * 3) * 0.3)))
+
+spec =
+  Bland.figure(size: {540, 300}, title: "Envelope")
+  |> Bland.axes(xlabel: "t [s]", ylabel: "|x(t)|")
+  |> Bland.line(xs2,
+       Enum.map(xs2, &abs(:math.cos(&1) + :math.sin(&1 * 3) * 0.3)))
+
+svg = Bland.grid([raw, spec], columns: 1,
+  cell_width: 540, cell_height: 300,
+  title: "Figure 4m — subplots")
+
+Kino.Image.new(svg, "image/svg+xml")
+```
+
 ## 5. Pattern gallery
 
 Every preset pattern rendered side-by-side. All bars share the same

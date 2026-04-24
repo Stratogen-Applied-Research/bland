@@ -24,7 +24,22 @@ defmodule Bland.Renderer do
   """
 
   alias Bland.{Figure, Patterns, Scale, Svg, Theme, Ticks}
-  alias Bland.Series.{Area, Bar, Heatmap, Histogram, Hline, Line, Polygon, Scatter, Vline}
+  alias Bland.Series.{
+    Area,
+    Bar,
+    BoxPlot,
+    Contour,
+    ErrorBar,
+    Heatmap,
+    Histogram,
+    Hline,
+    Line,
+    Polygon,
+    Quiver,
+    Scatter,
+    Stem,
+    Vline
+  }
 
   @doc """
   Renders a figure to an SVG binary.
@@ -57,7 +72,12 @@ defmodule Bland.Renderer do
   defp build_context(%Figure{} = fig) do
     fig = auto_adjust_margins(fig)
     {px, py, pw, ph} = Figure.plot_rect(fig)
-    categorical? = Enum.any?(fig.series, &match?(%Bar{}, &1))
+    categorical? =
+      Enum.any?(fig.series, fn
+        %Bar{} -> true
+        %BoxPlot{} -> true
+        _ -> false
+      end)
 
     projection = fig.projection || :none
 
@@ -154,6 +174,10 @@ defmodule Bland.Renderer do
     end
   end
 
+  # :polar is special — the user's xlim/ylim are already in projected
+  # (Cartesian) coordinates, so we do not re-project them.
+  defp resolve_xlim(%Figure{xlim: {a, b}}, _, :polar), do: {{a * 1.0, b * 1.0}, nil}
+
   defp resolve_xlim(%Figure{xlim: {a, b}}, _, proj) do
     {xa, _} = project_xy({a, 0}, proj)
     {xb, _} = project_xy({b, 0}, proj)
@@ -165,6 +189,7 @@ defmodule Bland.Renderer do
       series
       |> Enum.flat_map(fn
         %Bar{categories: c} -> c
+        %BoxPlot{categories: c} -> c
         _ -> []
       end)
       |> Enum.uniq()
@@ -184,6 +209,8 @@ defmodule Bland.Renderer do
 
     {domain, nil}
   end
+
+  defp resolve_ylim(%Figure{ylim: {a, b}}, :polar), do: {a * 1.0, b * 1.0}
 
   defp resolve_ylim(%Figure{ylim: {a, b}}, proj) do
     project_xy_y_range({a, b}, proj)
@@ -216,18 +243,40 @@ defmodule Bland.Renderer do
     [{List.first(xe), List.first(ye)}, {List.last(xe), List.last(ye)}]
   end
   defp xy_points(%Polygon{xs: xs, ys: ys}), do: Enum.zip(xs, ys)
+  defp xy_points(%ErrorBar{xs: xs, ys: ys}), do: Enum.zip(xs, ys)
+  defp xy_points(%Stem{xs: xs, ys: ys, baseline: b}),
+    do: Enum.zip(xs, ys) ++ Enum.map(xs, &{&1, b})
+  defp xy_points(%Quiver{xs: xs, ys: ys, us: us, vs: vs}) do
+    base = Enum.zip(xs, ys)
+    tips = Enum.zip(Enum.zip(xs, us), Enum.zip(ys, vs))
+           |> Enum.map(fn {{x, u}, {y, v}} -> {x + u, y + v} end)
+    base ++ tips
+  end
+  defp xy_points(%Contour{x_edges: nil}), do: []
+  defp xy_points(%Contour{x_edges: xe, y_edges: ye}) do
+    [{List.first(xe), List.first(ye)}, {List.last(xe), List.last(ye)}]
+  end
+  defp xy_points(%BoxPlot{}), do: []
   defp xy_points(%Vline{x: x}), do: [{x, 0}]
   defp xy_points(_), do: []
 
   defp y_only_values(%Histogram{values: v}), do: [0 | v]
   defp y_only_values(%Bar{values: v}), do: [0 | v]
   defp y_only_values(%Hline{y: y}), do: [y]
+
+  defp y_only_values(%BoxPlot{stats: stats}) do
+    Enum.flat_map(stats, fn s ->
+      [s.min, s.max] ++ (Map.get(s, :outliers) || [])
+    end)
+  end
+
   defp y_only_values(_), do: []
 
   defp project_points(points, :none), do: points
   defp project_points(points, proj), do: Enum.map(points, &project_xy(&1, proj))
 
   defp project_xy({x, y}, :none), do: {x, y}
+  defp project_xy({x, y}, :polar), do: Bland.Polar.project({x, y})
   defp project_xy({x, y}, proj), do: Bland.Geo.project(proj, {x, y})
 
   defp project_xy_y_range({a, b}, :none), do: {a, b}
@@ -245,6 +294,7 @@ defmodule Bland.Renderer do
       %Area{hatch: h} -> [h]
       %Histogram{hatch: h} -> [h]
       %Polygon{hatch: h} -> [h]
+      %BoxPlot{hatch: h} -> [h]
       %Heatmap{ramp: r} when is_list(r) -> r
       %Heatmap{ramp: nil} -> Bland.Heatmap.default_ramp()
       _ -> []
@@ -355,10 +405,20 @@ defmodule Bland.Renderer do
     clip_id = "bland-clip-plot"
     {px, py, pw, ph} = ctx.plot_rect
 
+    clip_shape =
+      case ctx.fig.clip do
+        :circle ->
+          cx = px + pw / 2
+          cy = py + ph / 2
+          r = min(pw, ph) / 2
+          ~s|<circle cx="#{Svg.num(cx)}" cy="#{Svg.num(cy)}" r="#{Svg.num(r)}"/>|
+
+        _ ->
+          ~s|<rect x="#{Svg.num(px)}" y="#{Svg.num(py)}" width="#{Svg.num(pw)}" height="#{Svg.num(ph)}"/>|
+      end
+
     clip_def =
-      Svg.defs([
-        ~s|<clipPath id="#{clip_id}"><rect x="#{Svg.num(px)}" y="#{Svg.num(py)}" width="#{Svg.num(pw)}" height="#{Svg.num(ph)}"/></clipPath>|
-      ])
+      Svg.defs([~s|<clipPath id="#{clip_id}">|, clip_shape, ~s|</clipPath>|])
 
     drawn =
       ctx.fig.series
@@ -635,12 +695,272 @@ defmodule Bland.Renderer do
     )
   end
 
+  defp draw_series(%ErrorBar{} = e, _index, ctx) do
+    sw = e.stroke_width || ctx.theme.series_stroke_width
+    cap = e.cap_width
+
+    points = Enum.zip(e.xs, e.ys)
+
+    whiskers =
+      points
+      |> Enum.with_index()
+      |> Enum.flat_map(fn {{x, y}, i} ->
+        {lo_y, hi_y} = err_bounds(e.yerr, i)
+        {lo_x, hi_x} = err_bounds(e.xerr, i)
+
+        v_whisker =
+          if lo_y != nil or hi_y != nil do
+            ylo = if lo_y, do: y - lo_y, else: y
+            yhi = if hi_y, do: y + hi_y, else: y
+
+            {px, pylo} = project_px(ctx, {x, ylo})
+            {_, pyhi} = project_px(ctx, {x, yhi})
+
+            [
+              Svg.line(px, pylo, px, pyhi,
+                stroke: ctx.theme.foreground,
+                "stroke-width": sw
+              ),
+              Svg.line(px - cap / 2, pylo, px + cap / 2, pylo,
+                stroke: ctx.theme.foreground,
+                "stroke-width": sw
+              ),
+              Svg.line(px - cap / 2, pyhi, px + cap / 2, pyhi,
+                stroke: ctx.theme.foreground,
+                "stroke-width": sw
+              )
+            ]
+          else
+            []
+          end
+
+        h_whisker =
+          if lo_x != nil or hi_x != nil do
+            xlo = if lo_x, do: x - lo_x, else: x
+            xhi = if hi_x, do: x + hi_x, else: x
+
+            {pxlo, py} = project_px(ctx, {xlo, y})
+            {pxhi, _} = project_px(ctx, {xhi, y})
+
+            [
+              Svg.line(pxlo, py, pxhi, py,
+                stroke: ctx.theme.foreground,
+                "stroke-width": sw
+              ),
+              Svg.line(pxlo, py - cap / 2, pxlo, py + cap / 2,
+                stroke: ctx.theme.foreground,
+                "stroke-width": sw
+              ),
+              Svg.line(pxhi, py - cap / 2, pxhi, py + cap / 2,
+                stroke: ctx.theme.foreground,
+                "stroke-width": sw
+              )
+            ]
+          else
+            []
+          end
+
+        [v_whisker, h_whisker]
+      end)
+
+    markers =
+      if e.marker do
+        marker = e.marker
+        size = e.marker_size || ctx.theme.marker_size
+
+        Enum.map(points, fn {x, y} ->
+          {px, py} = project_px(ctx, {x, y})
+          Bland.Markers.draw(marker, px, py, size: size, stroke_width: sw)
+        end)
+      else
+        []
+      end
+
+    [whiskers, markers]
+  end
+
+  defp draw_series(%Stem{} = s, index, ctx) do
+    stroke = s.stroke || :solid
+    sw = s.stroke_width || ctx.theme.series_stroke_width
+    marker = s.marker || Bland.Markers.cycle(index)
+    size = s.marker_size || ctx.theme.marker_size
+
+    Enum.zip(s.xs, s.ys)
+    |> Enum.map(fn {x, y} ->
+      {px, py} = project_px(ctx, {x, y})
+      {_, py_base} = project_px(ctx, {x, s.baseline})
+
+      [
+        Svg.line(px, py_base, px, py,
+          stroke: ctx.theme.foreground,
+          "stroke-width": sw,
+          "stroke-dasharray": Bland.Strokes.dasharray(stroke)
+        ),
+        Bland.Markers.draw(marker, px, py, size: size, stroke_width: sw)
+      ]
+    end)
+  end
+
+  defp draw_series(%Quiver{} = q, _index, ctx) do
+    sw = q.stroke_width || ctx.theme.series_stroke_width
+    scale = q.scale
+    head = q.head_size
+
+    Enum.zip([q.xs, q.ys, q.us, q.vs])
+    |> Enum.map(fn {x, y, u, v} ->
+      {x1, y1} = project_px(ctx, {x, y})
+      {x2, y2} = project_px(ctx, {x + u * scale, y + v * scale})
+
+      angle = :math.atan2(y2 - y1, x2 - x1)
+      ax1 = x2 - head * :math.cos(angle - :math.pi() / 8)
+      ay1 = y2 - head * :math.sin(angle - :math.pi() / 8)
+      ax2 = x2 - head * :math.cos(angle + :math.pi() / 8)
+      ay2 = y2 - head * :math.sin(angle + :math.pi() / 8)
+
+      [
+        Svg.line(x1, y1, x2, y2,
+          stroke: ctx.theme.foreground,
+          "stroke-width": sw,
+          "stroke-dasharray": Bland.Strokes.dasharray(q.stroke)
+        ),
+        Svg.polygon([{x2, y2}, {ax1, ay1}, {ax2, ay2}], fill: ctx.theme.foreground)
+      ]
+    end)
+  end
+
+  defp draw_series(%BoxPlot{} = b, index, ctx) do
+    hatch = b.hatch || Patterns.cycle(index)
+    sw = b.stroke_width || ctx.theme.series_stroke_width
+
+    slot_w = category_slot_width(ctx)
+    box_w = slot_w * b.box_width
+
+    Enum.zip(b.categories, b.stats)
+    |> Enum.map(fn {cat, stats} ->
+      case Enum.find_index(ctx.categories, &(&1 == cat)) do
+        nil ->
+          []
+
+        idx ->
+          cx = Scale.project(ctx.xscale, idx)
+          y_min = Scale.project(ctx.yscale, stats.min)
+          y_q1 = Scale.project(ctx.yscale, stats.q1)
+          y_med = Scale.project(ctx.yscale, stats.median)
+          y_q3 = Scale.project(ctx.yscale, stats.q3)
+          y_max = Scale.project(ctx.yscale, stats.max)
+
+          left = cx - box_w / 2
+          right = cx + box_w / 2
+
+          box =
+            Svg.rect(left, min(y_q1, y_q3), box_w, abs(y_q3 - y_q1),
+              fill: Patterns.fill(hatch),
+              stroke: ctx.theme.foreground,
+              "stroke-width": sw
+            )
+
+          median =
+            Svg.line(left, y_med, right, y_med,
+              stroke: ctx.theme.foreground,
+              "stroke-width": sw * 1.4
+            )
+
+          # Whiskers (dashed) from box edge to min/max
+          upper_whisker =
+            Svg.line(cx, min(y_q1, y_q3), cx, y_max,
+              stroke: ctx.theme.foreground,
+              "stroke-width": sw,
+              "stroke-dasharray": "4 2"
+            )
+
+          lower_whisker =
+            Svg.line(cx, max(y_q1, y_q3), cx, y_min,
+              stroke: ctx.theme.foreground,
+              "stroke-width": sw,
+              "stroke-dasharray": "4 2"
+            )
+
+          cap_w = box_w * 0.4
+
+          upper_cap =
+            Svg.line(cx - cap_w / 2, y_max, cx + cap_w / 2, y_max,
+              stroke: ctx.theme.foreground,
+              "stroke-width": sw
+            )
+
+          lower_cap =
+            Svg.line(cx - cap_w / 2, y_min, cx + cap_w / 2, y_min,
+              stroke: ctx.theme.foreground,
+              "stroke-width": sw
+            )
+
+          outliers =
+            (Map.get(stats, :outliers) || [])
+            |> Enum.map(fn y_val ->
+              Bland.Markers.draw(:circle_open, cx,
+                Scale.project(ctx.yscale, y_val),
+                size: 3, stroke_width: sw
+              )
+            end)
+
+          [box, median, upper_whisker, upper_cap, lower_whisker, lower_cap, outliers]
+      end
+    end)
+  end
+
+  defp draw_series(%Contour{} = c, _index, ctx) do
+    stroke = c.stroke || :solid
+    sw = c.stroke_width || ctx.theme.series_stroke_width
+
+    segments = Bland.Contour.segments(c.data, c.x_edges, c.y_edges, c.levels, c.origin)
+
+    Enum.with_index(segments)
+    |> Enum.map(fn {{_level, segs}, i} ->
+      dash =
+        case Enum.at(c.levels, i) do
+          v when is_number(v) and v < 0 -> :dashed
+          _ -> stroke
+        end
+
+      Enum.map(segs, fn {{x1, y1}, {x2, y2}} ->
+        {px1, py1} = project_px(ctx, {x1, y1})
+        {px2, py2} = project_px(ctx, {x2, y2})
+
+        Svg.line(px1, py1, px2, py2,
+          stroke: ctx.theme.foreground,
+          "stroke-width": sw,
+          "stroke-dasharray": Bland.Strokes.dasharray(dash)
+        )
+      end)
+    end)
+  end
+
+  # Helper: project a data-space point to pixel space, going through the
+  # figure projection (mercator/polar/etc.) first.
+  defp project_px(ctx, {x, y}) do
+    {x2, y2} = project_xy({x, y}, ctx.projection)
+    {Scale.project(ctx.xscale, x2), Scale.project(ctx.yscale, y2)}
+  end
+
+  # ErrorBar helper: normalize yerr / xerr at index `i` into `{lo, hi}`.
+  defp err_bounds(nil, _), do: {nil, nil}
+
+  defp err_bounds(list, i) when is_list(list) do
+    case Enum.at(list, i) do
+      nil -> {nil, nil}
+      {lo, hi} -> {lo, hi}
+      half when is_number(half) -> {half, half}
+    end
+  end
+
   defp category_slot_width(%{xscale: xs, categories: [_, _ | _]}),
     do: abs(Scale.project(xs, 1) - Scale.project(xs, 0))
 
   defp category_slot_width(%{plot_rect: {_, _, pw, _}}), do: pw * 0.6
 
   # --- axes -----------------------------------------------------------------
+
+  defp axes_layer(%{fig: %{axes: :none}}), do: []
 
   defp axes_layer(%{theme: t, plot_rect: {px, py, pw, ph}} = ctx) do
     frame =
@@ -966,6 +1286,38 @@ defmodule Bland.Renderer do
 
   defp legend_entry(%Vline{label: label, stroke: stroke}, _) when not is_nil(label),
     do: [{label, :line, %{stroke: stroke, marker: nil}}]
+
+  defp legend_entry(%ErrorBar{label: nil}, _), do: []
+
+  defp legend_entry(%ErrorBar{label: label, marker: marker}, _) do
+    [{label, :scatter, %{marker: marker || :circle_filled}}]
+  end
+
+  defp legend_entry(%BoxPlot{label: nil}, _), do: []
+
+  defp legend_entry(%BoxPlot{label: label} = b, i) do
+    hatch = b.hatch || Patterns.cycle(i)
+    [{label, :bar, %{hatch: hatch}}]
+  end
+
+  defp legend_entry(%Stem{label: nil}, _), do: []
+
+  defp legend_entry(%Stem{label: label} = s, i) do
+    marker = s.marker || Bland.Markers.cycle(i)
+    [{label, :line, %{stroke: s.stroke || :solid, marker: marker}}]
+  end
+
+  defp legend_entry(%Contour{label: nil}, _), do: []
+
+  defp legend_entry(%Contour{label: label, stroke: stroke}, _) do
+    [{label, :line, %{stroke: stroke || :solid, marker: nil}}]
+  end
+
+  defp legend_entry(%Quiver{label: nil}, _), do: []
+
+  defp legend_entry(%Quiver{label: label, stroke: stroke}, _) do
+    [{label, :line, %{stroke: stroke || :solid, marker: nil}}]
+  end
 
   defp legend_entry(_, _), do: []
 

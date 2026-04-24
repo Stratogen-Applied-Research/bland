@@ -1,7 +1,7 @@
 defmodule Bland.MixProject do
   use Mix.Project
 
-  @version "0.2.0"
+  @version "0.3.0"
   @source_url "https://github.com/Stratogen-Applied-Research/bland"
 
   def project do
@@ -55,12 +55,17 @@ defmodule Bland.MixProject do
       main: "readme",
       extras: [
         "README.md",
+        "pages/gallery.md",
         "pages/getting_started.md",
         "pages/patterns_and_hatching.md",
         "pages/styling_and_themes.md",
         "pages/paper_output.md",
         "notebooks/showcase.livemd"
       ],
+      # Copies pages/assets/ → doc/assets/ so `![](assets/foo.svg)` in
+      # markdown resolves both in guides and module docs. Regenerate
+      # the SVGs via `mix bland.docs.examples`.
+      assets: %{"pages/assets" => "assets"},
       groups_for_extras: [
         Guides: ~r"pages/.*",
         Notebooks: ~r"notebooks/.*"

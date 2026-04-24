@@ -4,10 +4,14 @@
 > technical plots in the visual tradition of 1960s–80s engineering
 > reports.
 
+![Hero — damped oscillation with title block](pages/assets/hero_title_block.svg)
+
 BLAND emits SVG. Plots look at home next to a title block, a set of
 fastener callouts, and a stack of punched cards — black ink on white
 paper, serif type, thin rules, hatched fills. No color, no gradients, no
 drop shadows.
+
+See the [gallery](pages/gallery.md) for every plot type at a glance.
 
 ```elixir
 xs = Enum.map(0..100, &(&1 / 10.0))
@@ -62,7 +66,7 @@ The package is published on Hex as `bland` and can be added to your project as f
 ```elixir
 def deps do
   [
-    {:bland, "~> 0.1.0"}
+    {:bland, "~> 0.2.1"}
   ]
 end
 ```
@@ -73,7 +77,7 @@ BLAND has no runtime dependencies on its own but requires `kino` when used in a 
 
 ```elixir
 Mix.install([
-  {:bland, "~> 0.1.0"},
+  {:bland, "~> 0.2.1"},
   {:kino, "~> 0.14"}
 ])
 

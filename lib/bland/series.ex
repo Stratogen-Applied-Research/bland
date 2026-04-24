@@ -12,8 +12,13 @@ defmodule Bland.Series do
     * `Bland.Series.Bar`       — categorical bars with hatched fills
     * `Bland.Series.Histogram` — binned observations (numeric x-axis)
     * `Bland.Series.Heatmap`   — 2D grid of hatched cells
+    * `Bland.Series.Contour`   — iso-level curves on a 2D grid
     * `Bland.Series.Area`      — filled region between a curve and a baseline
     * `Bland.Series.Polygon`   — closed filled polygon
+    * `Bland.Series.ErrorBar`  — points with X/Y uncertainty whiskers
+    * `Bland.Series.BoxPlot`   — box-and-whisker summary per category
+    * `Bland.Series.Stem`      — vertical stems with markers (DSP)
+    * `Bland.Series.Quiver`    — 2D arrow vector field
     * `Bland.Series.Hline`     — horizontal reference line
     * `Bland.Series.Vline`     — vertical reference line
 
@@ -131,6 +136,125 @@ defmodule Bland.Series do
               stroke_width: nil
   end
 
+  defmodule ErrorBar do
+    @moduledoc """
+    Error-bar series — discrete `(x, y)` points with optional X
+    and/or Y uncertainty whiskers.
+
+    Fields:
+      * `:xs`, `:ys` — data points (length n)
+      * `:yerr`   — list of y half-widths (symmetric) or `{lo, hi}`
+        tuples (asymmetric); `nil` disables y whiskers
+      * `:xerr`   — same for x
+      * `:marker` — preset or `nil`. When `nil`, only whiskers are drawn.
+      * `:marker_size`
+      * `:cap_width` — whisker cap in px (default `4`)
+      * `:stroke_width`, `:label`
+    """
+    defstruct type: :errorbar,
+              xs: [],
+              ys: [],
+              yerr: nil,
+              xerr: nil,
+              label: nil,
+              marker: :circle_filled,
+              marker_size: nil,
+              cap_width: 4,
+              stroke_width: nil
+  end
+
+  defmodule BoxPlot do
+    @moduledoc """
+    Box-and-whisker series. One box per category.
+
+    Fields:
+      * `:categories` — list of category labels (one per box)
+      * `:stats`      — list of maps, one per box, each with
+        `%{min, q1, median, q3, max, outliers}` keys. `outliers`
+        is a (possibly-empty) list of y-values rendered as open
+        markers beyond the whiskers.
+      * `:hatch`      — IQR box fill (default cycles)
+      * `:label`      — legend label
+      * `:stroke_width`, `:box_width` (fraction of slot; default 0.6)
+    """
+    defstruct type: :boxplot,
+              categories: [],
+              stats: [],
+              label: nil,
+              hatch: nil,
+              stroke_width: nil,
+              box_width: 0.6
+  end
+
+  defmodule Stem do
+    @moduledoc """
+    Stem-plot series — a vertical line from `baseline` to `(x, y)`
+    with a marker at the tip. Canonical for discrete-time signals.
+
+    Fields:
+      * `:xs`, `:ys`
+      * `:baseline` — stem start y (default `0`)
+      * `:marker`, `:marker_size`, `:stroke`, `:stroke_width`, `:label`
+    """
+    defstruct type: :stem,
+              xs: [],
+              ys: [],
+              baseline: 0.0,
+              label: nil,
+              marker: :circle_filled,
+              marker_size: nil,
+              stroke: :solid,
+              stroke_width: nil
+  end
+
+  defmodule Contour do
+    @moduledoc """
+    Contour series — iso-level curves on a 2D scalar grid.
+
+    Fields:
+      * `:data`     — rows of numbers (same shape conventions as `Heatmap`)
+      * `:x_edges`, `:y_edges` — length `cols + 1` / `rows + 1`
+      * `:levels`   — list of scalar values at which to draw contours
+      * `:origin`   — `:bottom_left` (default) or `:top_left`
+      * `:label`    — legend label for the contour set
+      * `:stroke`, `:stroke_width`
+    """
+    defstruct type: :contour,
+              data: [],
+              x_edges: nil,
+              y_edges: nil,
+              levels: [],
+              origin: :bottom_left,
+              label: nil,
+              stroke: :solid,
+              stroke_width: nil
+  end
+
+  defmodule Quiver do
+    @moduledoc """
+    Quiver series — a 2D vector field. Each `(x, y)` has an arrow
+    pointing in the direction of `(u, v)` with length proportional
+    to `√(u² + v²)`.
+
+    Fields:
+      * `:xs`, `:ys` — tail positions (length n)
+      * `:us`, `:vs` — vector components at each tail (length n)
+      * `:scale`   — multiplier applied to every vector before drawing
+      * `:head_size` — arrow-head length in px (default `6`)
+      * `:stroke`, `:stroke_width`, `:label`
+    """
+    defstruct type: :quiver,
+              xs: [],
+              ys: [],
+              us: [],
+              vs: [],
+              scale: 1.0,
+              head_size: 6,
+              label: nil,
+              stroke: :solid,
+              stroke_width: nil
+  end
+
   defmodule Polygon do
     @moduledoc """
     Closed filled polygon in data space. See `Bland.polygon/4`.
@@ -181,6 +305,13 @@ defmodule Bland.Series do
   def x_extent(%Heatmap{x_edges: edges}),
     do: {List.first(edges), List.last(edges)}
   def x_extent(%Polygon{xs: xs}), do: extent(xs)
+  def x_extent(%ErrorBar{xs: xs}), do: extent(xs)
+  def x_extent(%Stem{xs: xs}), do: extent(xs)
+  def x_extent(%Quiver{xs: xs, us: us}),
+    do: merge_extents(extent(xs), extent(Enum.zip(xs, us) |> Enum.map(fn {x, u} -> x + u end)))
+  def x_extent(%BoxPlot{categories: c}) when c != [], do: {0, length(c) - 1}
+  def x_extent(%Contour{x_edges: nil}), do: nil
+  def x_extent(%Contour{x_edges: edges}), do: {List.first(edges), List.last(edges)}
   def x_extent(%Vline{x: x}), do: {x, x}
   def x_extent(_), do: nil
 
@@ -197,6 +328,26 @@ defmodule Bland.Series do
   def y_extent(%Heatmap{y_edges: edges}),
     do: {List.first(edges), List.last(edges)}
   def y_extent(%Polygon{ys: ys}), do: extent(ys)
+  def y_extent(%ErrorBar{ys: ys, yerr: nil}), do: extent(ys)
+  def y_extent(%ErrorBar{ys: ys, yerr: yerr}), do: errorbar_y_extent(ys, yerr)
+  def y_extent(%Stem{ys: ys, baseline: b}), do: extent([b | ys])
+  def y_extent(%Quiver{ys: ys, vs: vs}),
+    do:
+      merge_extents(
+        extent(ys),
+        extent(Enum.zip(ys, vs) |> Enum.map(fn {y, v} -> y + v end))
+      )
+  def y_extent(%BoxPlot{stats: stats}) do
+    all =
+      stats
+      |> Enum.flat_map(fn s ->
+        [s.min, s.max] ++ (Map.get(s, :outliers) || [])
+      end)
+
+    extent(all)
+  end
+  def y_extent(%Contour{y_edges: nil}), do: nil
+  def y_extent(%Contour{y_edges: edges}), do: {List.first(edges), List.last(edges)}
   def y_extent(%Hline{y: y}), do: {y, y}
   def y_extent(_), do: nil
 
@@ -213,5 +364,24 @@ defmodule Bland.Series do
   defp extent(vals) do
     {min, max} = Enum.min_max(vals)
     {min, max}
+  end
+
+  defp merge_extents(nil, b), do: b
+  defp merge_extents(a, nil), do: a
+
+  defp merge_extents({lo1, hi1}, {lo2, hi2}),
+    do: {min(lo1, lo2), max(hi1, hi2)}
+
+  defp errorbar_y_extent(ys, yerr) do
+    pairs = Enum.zip(ys, yerr)
+
+    bounds =
+      Enum.flat_map(pairs, fn
+        {y, {lo, hi}} -> [y - lo, y + hi]
+        {y, half} when is_number(half) -> [y - half, y + half]
+        {y, _} -> [y]
+      end)
+
+    extent(bounds)
   end
 end
