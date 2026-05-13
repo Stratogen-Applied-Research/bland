@@ -30,7 +30,10 @@ defmodule Bland.Figure do
     * `:margins` — `{top, right, bottom, left}` inside the border
     * `:title`, `:subtitle` — figure text
     * `:xlim`, `:ylim` — data-space limits, or `:auto` (default)
-    * `:xscale`, `:yscale` — `:linear` (default) or `:log`
+    * `:xscale`, `:yscale` — `:linear` (default), `:log`, or `:date`
+    * `:xtick_format`, `:ytick_format` — optional `Calendar.strftime/2`
+      format string for `:date` axes; `nil` (default) picks one based on
+      the visible span
     * `:xlabel`, `:ylabel`
     * `:grid` — `:none | :major | :both`
     * `:series` — list of `%Bland.Series{}` in draw order
@@ -64,8 +67,8 @@ defmodule Bland.Figure do
           ylabel: String.t() | nil,
           xlim: {number(), number()} | :auto,
           ylim: {number(), number()} | :auto,
-          xscale: :linear | :log,
-          yscale: :linear | :log,
+          xscale: :linear | :log | :date,
+          yscale: :linear | :log | :date,
           grid: :none | :major | :both,
           series: [map()],
           legend: map() | nil,
@@ -88,6 +91,8 @@ defmodule Bland.Figure do
             ylim: :auto,
             xscale: :linear,
             yscale: :linear,
+            xtick_format: nil,
+            ytick_format: nil,
             grid: :major,
             series: [],
             legend: nil,

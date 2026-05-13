@@ -361,7 +361,17 @@ defmodule Bland do
     * `:grid` — `:none`, `:major` (default), `:both`
   """
   @spec axes(Figure.t(), keyword()) :: Figure.t()
-  def axes(%Figure{} = fig, opts), do: Figure.update(fig, opts)
+  def axes(%Figure{} = fig, opts) do
+    Figure.update(fig, Enum.map(opts, &normalize_axis_opt/1))
+  end
+
+  defp normalize_axis_opt({key, {%Date{} = a, %Date{} = b}}) when key in [:xlim, :ylim],
+    do: {key, {to_axis_value(a), to_axis_value(b)}}
+
+  defp normalize_axis_opt({key, {a, b}}) when key in [:xlim, :ylim],
+    do: {key, {to_axis_value(a), to_axis_value(b)}}
+
+  defp normalize_axis_opt(other), do: other
 
   @doc """
   Adds a line series.
@@ -380,9 +390,11 @@ defmodule Bland do
 
       Bland.line(fig, xs, ys, label: "velocity", stroke: :dashed, markers: true)
   """
-  @spec line(Figure.t(), [number()], [number()], keyword()) :: Figure.t()
+  @spec line(Figure.t(), [number() | Date.t()], [number() | Date.t()], keyword()) :: Figure.t()
   def line(%Figure{} = fig, xs, ys, opts \\ []) do
-    Figure.add_series(fig, struct(Series.Line, [xs: xs, ys: ys] ++ opts))
+    Figure.add_series(fig, struct(Series.Line,
+      [xs: normalize_axis_values(xs), ys: normalize_axis_values(ys)] ++ opts
+    ))
   end
 
   @doc """
@@ -390,9 +402,12 @@ defmodule Bland do
 
   Accepts `:label`, `:marker`, `:marker_size`, `:stroke_width`.
   """
-  @spec scatter(Figure.t(), [number()], [number()], keyword()) :: Figure.t()
+  @spec scatter(Figure.t(), [number() | Date.t()], [number() | Date.t()], keyword()) ::
+          Figure.t()
   def scatter(%Figure{} = fig, xs, ys, opts \\ []) do
-    Figure.add_series(fig, struct(Series.Scatter, [xs: xs, ys: ys] ++ opts))
+    Figure.add_series(fig, struct(Series.Scatter,
+      [xs: normalize_axis_values(xs), ys: normalize_axis_values(ys)] ++ opts
+    ))
   end
 
   @doc """
@@ -430,9 +445,12 @@ defmodule Bland do
     * `:stroke`   — outline dash preset (default `:solid`)
     * `:stroke_width`
   """
-  @spec area(Figure.t(), [number()], [number()], keyword()) :: Figure.t()
+  @spec area(Figure.t(), [number() | Date.t()], [number() | Date.t()], keyword()) ::
+          Figure.t()
   def area(%Figure{} = fig, xs, ys, opts \\ []) do
-    Figure.add_series(fig, struct(Series.Area, [xs: xs, ys: ys] ++ opts))
+    Figure.add_series(fig, struct(Series.Area,
+      [xs: normalize_axis_values(xs), ys: normalize_axis_values(ys)] ++ opts
+    ))
   end
 
   @doc """
@@ -1112,10 +1130,68 @@ defmodule Bland do
 
   Options: `:label`, `:stroke` (default `:dashed`), `:stroke_width`.
   """
-  @spec vline(Figure.t(), number(), keyword()) :: Figure.t()
+  @spec vline(Figure.t(), number() | Date.t(), keyword()) :: Figure.t()
   def vline(%Figure{} = fig, x, opts \\ []) do
-    Figure.add_series(fig, struct(Series.Vline, [x: x] ++ opts))
+    Figure.add_series(fig, struct(Series.Vline, [x: to_axis_value(x)] ++ opts))
   end
+
+  @doc """
+  Adds a vertical shaded band spanning `x ∈ [x1, x2]`.
+
+  Drawn *behind* every data series so it never obscures curves. Both
+  bounds accept numeric values OR `Date.t()` (auto-converted to epoch
+  days when the figure's `xscale` is `:date`).
+
+  ## Options
+
+    * `:hatch`         — fill pattern (default `:dots_sparse`)
+    * `:alpha`         — fill opacity 0–1 (default `0.35`)
+    * `:stroke`        — optional border dash preset; `nil` (default)
+      gives a borderless band
+    * `:stroke_width`, `:label`
+
+  ## Example — event window on a price chart
+
+      Bland.figure() |> Bland.axes(xscale: :date)
+      |> Bland.vspan(~D[2024-03-10], ~D[2024-03-25],
+           hatch: :diagonal, alpha: 0.25, label: "embargo")
+      |> Bland.line(dates, prices)
+  """
+  @spec vspan(Figure.t(), number() | Date.t(), number() | Date.t(), keyword()) :: Figure.t()
+  def vspan(%Figure{} = fig, x1, x2, opts \\ []) do
+    Figure.add_series(fig, struct(Series.Vspan,
+      [x1: to_axis_value(x1), x2: to_axis_value(x2)] ++ opts
+    ))
+  end
+
+  @doc """
+  Adds a horizontal shaded band spanning `y ∈ [y1, y2]`. Same options
+  as `vspan/4`. Useful for acceptance bands and tolerance windows.
+  """
+  @spec hspan(Figure.t(), number() | Date.t(), number() | Date.t(), keyword()) :: Figure.t()
+  def hspan(%Figure{} = fig, y1, y2, opts \\ []) do
+    Figure.add_series(fig, struct(Series.Hspan,
+      [y1: to_axis_value(y1), y2: to_axis_value(y2)] ++ opts
+    ))
+  end
+
+  # Date.t() → epoch days (Date.diff from year-0 January 1). Numeric
+  # values pass through. Lets every series builder accept either.
+  defp to_axis_value(%Date{} = d), do: Bland.DateTime.date_to_axis(d)
+  defp to_axis_value(v) when is_number(v), do: v
+  defp to_axis_value(other), do: other
+
+  # List/range form: map each element through `to_axis_value/1`. Cheap
+  # no-op for already-numeric lists (the common case).
+  defp normalize_axis_values(values) when is_list(values) do
+    case values do
+      [] -> []
+      [first | _] = list when is_struct(first, Date) -> Enum.map(list, &to_axis_value/1)
+      list -> list
+    end
+  end
+
+  defp normalize_axis_values(other), do: other
 
   @doc """
   Adds an annotation overlay.

@@ -21,6 +21,8 @@ defmodule Bland.Series do
     * `Bland.Series.Quiver`    — 2D arrow vector field
     * `Bland.Series.Hline`     — horizontal reference line
     * `Bland.Series.Vline`     — vertical reference line
+    * `Bland.Series.Hspan`     — horizontal shaded band (y-bounds)
+    * `Bland.Series.Vspan`     — vertical shaded band (x-bounds)
 
   Prefer the builder helpers in `Bland` rather than instantiating these
   directly.
@@ -289,6 +291,52 @@ defmodule Bland.Series do
     defstruct type: :vline, x: 0.0, label: nil, stroke: :dashed, stroke_width: 1.0
   end
 
+  defmodule Vspan do
+    @moduledoc """
+    Vertical shaded reference region — a rectangle spanning
+    `x ∈ [x1, x2]` across the full plot height. Drawn *behind* every
+    data series so it never obscures the curves.
+
+    Fields:
+      * `:x1`, `:x2`        — bounds in data space (accept `Date.t()`)
+      * `:hatch`            — fill pattern (default `:dots_sparse`)
+      * `:alpha`            — fill opacity 0..1 (default `0.35`)
+      * `:stroke`           — optional border dash preset; `nil` for borderless
+      * `:stroke_width`, `:label`
+    """
+    defstruct type: :vspan,
+              x1: 0.0,
+              x2: 1.0,
+              label: nil,
+              hatch: :dots_sparse,
+              alpha: 0.35,
+              stroke: nil,
+              stroke_width: nil
+  end
+
+  defmodule Hspan do
+    @moduledoc """
+    Horizontal shaded reference region — a rectangle spanning
+    `y ∈ [y1, y2]` across the full plot width. Drawn *behind* every
+    data series. Useful for acceptance bands, tolerance windows.
+
+    Fields:
+      * `:y1`, `:y2`        — bounds in data space
+      * `:hatch`            — fill pattern (default `:dots_sparse`)
+      * `:alpha`            — fill opacity 0..1 (default `0.35`)
+      * `:stroke`           — optional border dash preset; `nil` for borderless
+      * `:stroke_width`, `:label`
+    """
+    defstruct type: :hspan,
+              y1: 0.0,
+              y2: 1.0,
+              label: nil,
+              hatch: :dots_sparse,
+              alpha: 0.35,
+              stroke: nil,
+              stroke_width: nil
+  end
+
   @doc """
   Returns `{min, max}` of the x-domain contributed by a series, or `nil`
   if the series has no x extent (e.g. `Hline`).
@@ -313,6 +361,7 @@ defmodule Bland.Series do
   def x_extent(%Contour{x_edges: nil}), do: nil
   def x_extent(%Contour{x_edges: edges}), do: {List.first(edges), List.last(edges)}
   def x_extent(%Vline{x: x}), do: {x, x}
+  def x_extent(%Vspan{x1: x1, x2: x2}), do: extent([x1, x2])
   def x_extent(_), do: nil
 
   @doc """
@@ -349,6 +398,7 @@ defmodule Bland.Series do
   def y_extent(%Contour{y_edges: nil}), do: nil
   def y_extent(%Contour{y_edges: edges}), do: {List.first(edges), List.last(edges)}
   def y_extent(%Hline{y: y}), do: {y, y}
+  def y_extent(%Hspan{y1: y1, y2: y2}), do: extent([y1, y2])
   def y_extent(_), do: nil
 
   @doc """

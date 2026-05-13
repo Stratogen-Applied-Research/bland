@@ -8,6 +8,7 @@ defmodule BlandTest do
   doctest Bland.Polar
   doctest Bland.Smith
   doctest Bland.Stats
+  doctest Bland.DateTime
 
   describe "figure/1" do
     test "builds a default letter-landscape figure" do
@@ -423,6 +424,155 @@ defmodule BlandTest do
       assert svg =~ "url(#bland-pattern-diagonal)"
       # Colorbar labels should appear
       assert svg =~ "intensity"
+    end
+  end
+
+  describe "vspan/4 + hspan/4" do
+    test "vspan adds a Vspan series with sensible defaults" do
+      fig = Bland.figure() |> Bland.vspan(1.0, 2.0, label: "window")
+
+      assert [%Bland.Series.Vspan{x1: 1.0, x2: 2.0, label: "window",
+                                  hatch: :dots_sparse, alpha: 0.35}] = fig.series
+    end
+
+    test "vspan auto-converts Date.t() bounds to epoch days" do
+      fig = Bland.figure() |> Bland.vspan(~D[2024-01-01], ~D[2024-01-10])
+      [%Bland.Series.Vspan{x1: x1, x2: x2}] = fig.series
+      assert is_integer(x1)
+      assert is_integer(x2)
+      assert x2 - x1 == 9
+    end
+
+    test "hspan adds an Hspan series" do
+      fig = Bland.figure() |> Bland.hspan(0.0, 1.0, hatch: :diagonal, alpha: 0.5)
+
+      [%Bland.Series.Hspan{} = h] = fig.series
+      assert h.y1 == 0.0
+      assert h.y2 == 1.0
+      assert h.hatch == :diagonal
+      assert h.alpha == 0.5
+    end
+
+    test "spans render behind data series (back-layering)" do
+      svg =
+        Bland.figure()
+        |> Bland.line([0, 10], [0, 10])
+        |> Bland.vspan(2, 6, hatch: :diagonal, label: "window")
+        |> Bland.to_svg()
+
+      # The vspan rect should appear earlier in the SVG than the polyline,
+      # because elements drawn first sit underneath later ones.
+      rect_idx = :binary.match(svg, "<rect x=") |> elem(0)
+      poly_idx = :binary.match(svg, "<polyline") |> elem(0)
+      # Page-border rect is at the very top; the span rect should come
+      # AFTER it but BEFORE the polyline.
+      assert poly_idx > rect_idx
+    end
+
+    test "renders with the correct fill opacity" do
+      svg =
+        Bland.figure()
+        |> Bland.vspan(0, 1, hatch: :diagonal, alpha: 0.42)
+        |> Bland.to_svg()
+
+      assert svg =~ ~s|fill-opacity="0.42"|
+    end
+  end
+
+  describe "Bland.DateTime" do
+    test "date_to_axis and axis_to_date round-trip" do
+      for d <- [~D[2024-01-01], ~D[1976-06-15], ~D[1999-12-31]] do
+        days = Bland.DateTime.date_to_axis(d)
+        assert Bland.DateTime.axis_to_date(days) == d
+      end
+    end
+
+    test "nice_ticks at month-scale snap to first-of-month" do
+      lo = Bland.DateTime.date_to_axis(~D[2024-01-15])
+      hi = Bland.DateTime.date_to_axis(~D[2024-06-15])
+      {ticks, fmt} = Bland.DateTime.nice_ticks({lo, hi}, 6)
+
+      dates = Enum.map(ticks, &Bland.DateTime.axis_to_date/1)
+      assert Enum.all?(dates, &(&1.day == 1))
+      assert fmt == "%b %Y"
+    end
+
+    test "nice_ticks at year-scale snap to Jan 1" do
+      lo = Bland.DateTime.date_to_axis(~D[2010-07-15])
+      hi = Bland.DateTime.date_to_axis(~D[2025-07-15])
+      {ticks, _fmt} = Bland.DateTime.nice_ticks({lo, hi}, 6)
+
+      dates = Enum.map(ticks, &Bland.DateTime.axis_to_date/1)
+      assert Enum.all?(dates, &(&1.day == 1 and &1.month == 1))
+    end
+
+    test "format produces strftime output" do
+      d = Bland.DateTime.date_to_axis(~D[2024-03-14])
+      assert Bland.DateTime.format(d, "%Y-%m-%d") == "2024-03-14"
+      assert Bland.DateTime.format(d, "%b %Y") == "Mar 2024"
+    end
+  end
+
+  describe ":date axis end-to-end" do
+    test "renders calendar-snapped tick labels" do
+      dates = Enum.map(0..90, &Date.add(~D[2024-01-01], &1))
+      ys = Enum.map(0..90, fn _ -> :rand.uniform() end)
+
+      svg =
+        Bland.figure()
+        |> Bland.axes(xscale: :date, xlim: {~D[2024-01-01], ~D[2024-03-31]})
+        |> Bland.line(dates, ys)
+        |> Bland.to_svg()
+
+      assert svg =~ "Jan 2024"
+      assert svg =~ "Feb 2024"
+      assert svg =~ "Mar 2024"
+    end
+
+    test "xtick_format override is honored" do
+      dates = [~D[2024-01-01], ~D[2024-06-01], ~D[2024-12-31]]
+      ys = [1.0, 2.0, 3.0]
+
+      svg =
+        Bland.figure()
+        |> Bland.axes(xscale: :date, xtick_format: "%Y-%m")
+        |> Bland.line(dates, ys)
+        |> Bland.to_svg()
+
+      # Quarter-start snap with the custom %Y-%m format
+      assert svg =~ "2024-03"
+      assert svg =~ "2024-06"
+    end
+
+    test "line/scatter/area accept Date.t() lists transparently" do
+      dates = [~D[2024-01-01], ~D[2024-01-02]]
+
+      fig =
+        Bland.figure()
+        |> Bland.axes(xscale: :date)
+        |> Bland.line(dates, [1.0, 2.0])
+        |> Bland.scatter(dates, [1.0, 2.0])
+        |> Bland.area(dates, [1.0, 2.0])
+
+      assert length(fig.series) == 3
+
+      [line | _] = fig.series
+      assert Enum.all?(line.xs, &is_integer/1)
+    end
+  end
+
+  describe "Bland.Kino" do
+    test "frame/0 raises a useful message when :kino is not loaded" do
+      # Kino is a Livebook dep; not present in `mix test`.
+      assert_raise RuntimeError, ~r/requires :kino/, fn ->
+        Bland.Kino.frame()
+      end
+    end
+
+    test "push/2 raises a useful message when :kino is not loaded" do
+      assert_raise RuntimeError, ~r/requires :kino/, fn ->
+        Bland.Kino.push(self(), Bland.figure() |> Bland.line([0, 1], [0, 1]))
+      end
     end
   end
 

@@ -406,6 +406,86 @@ svg = Bland.grid([raw, spec], columns: 1,
 Kino.Image.new(svg, "image/svg+xml")
 ```
 
+## 4n. Date axis + shaded reference window
+
+`xscale: :date` interprets values as epoch days. Series builders
+auto-convert `Date.t()` lists, and `xlim`/`ylim` accept Date tuples.
+Ticks snap to calendar boundaries (month/quarter/year) depending on
+span.
+
+`vspan/4` and `hspan/4` add shaded reference regions. They render
+*behind* every data series so curves stay on top.
+
+```elixir
+:rand.seed(:exsss, {1, 2, 3})
+dates = Enum.map(0..90, fn d -> Date.add(~D[2024-01-01], d) end)
+
+prices =
+  Enum.reduce(1..91, [100.0], fn _, [last | _] = acc ->
+    [last + (:rand.uniform() - 0.5) * 2.0 | acc]
+  end)
+  |> Enum.reverse()
+
+Bland.figure(size: :a5_landscape, title: "Figure 4n — event study")
+|> Bland.axes(xlabel: "date", ylabel: "price [$]", xscale: :date)
+|> Bland.vspan(~D[2024-02-10], ~D[2024-02-20],
+     hatch: :diagonal, alpha: 0.3, label: "embargo")
+|> Bland.line(dates, prices, label: "close")
+|> Bland.legend(position: :top_left)
+|> Bland.to_kino()
+```
+
+A multi-year date axis automatically picks year-start ticks:
+
+```elixir
+years = Enum.map(0..(365 * 5), fn d -> Date.add(~D[2020-01-01], d) end)
+vals = Enum.map(0..(365 * 5), fn i ->
+  100 * :math.exp(i / 2000) + 5 * :math.sin(i / 30)
+end)
+
+Bland.figure(size: :a5_landscape, title: "Five-year run")
+|> Bland.axes(xscale: :date, xlabel: "date", ylabel: "value")
+|> Bland.hspan(120, 140, hatch: :dots_sparse, alpha: 0.3, label: "target band")
+|> Bland.line(years, vals)
+|> Bland.legend(position: :top_left)
+|> Bland.to_kino()
+```
+
+## 4o. Live updates with `Bland.Kino`
+
+`Bland.Kino` wraps `Kino.Frame` so a figure can be re-rendered in
+place from a streaming data source — sensors, queue depths, prices,
+anything that arrives over time.
+
+```elixir
+frame = Bland.Kino.frame()
+```
+
+Push updates from a separate cell (or a task). Each push replaces
+the previous figure in the frame:
+
+```elixir
+# Run-as-needed: pretend each iteration is a new sensor reading
+Task.async(fn ->
+  Enum.reduce(1..60, [], fn i, history ->
+    point = {i * 1.0, :math.sin(i / 5) + (:rand.uniform() - 0.5) * 0.2}
+    history = history ++ [point]
+    {xs, ys} = Enum.unzip(history)
+
+    Bland.figure(size: :a5_landscape, title: "Live sensor")
+    |> Bland.axes(xlabel: "t [s]", ylabel: "reading")
+    |> Bland.line(xs, ys, label: "ch.1")
+    |> Bland.legend(position: :top_right)
+    |> then(&Bland.Kino.push(frame, &1))
+
+    Process.sleep(200)
+    history
+  end)
+end)
+```
+
+The `frame` cell will update at the cadence of `Process.sleep/1`.
+
 ## 5. Pattern gallery
 
 Every preset pattern rendered side-by-side. All bars share the same

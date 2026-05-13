@@ -33,12 +33,14 @@ defmodule Bland.Renderer do
     Heatmap,
     Histogram,
     Hline,
+    Hspan,
     Line,
     Polygon,
     Quiver,
     Scatter,
     Stem,
-    Vline
+    Vline,
+    Vspan
   }
 
   @doc """
@@ -144,6 +146,9 @@ defmodule Bland.Renderer do
 
   defp build_scale(:linear, domain, range), do: Scale.linear(domain, range)
   defp build_scale(:log, domain, range), do: Scale.log(domain, range)
+  # :date scales are stored as epoch-day numerics, so under the hood
+  # they're just linear scales.
+  defp build_scale(:date, domain, range), do: Scale.linear(domain, range)
 
   # When a title block is attached, push the plot area up so the block sits
   # in the margin rather than over the curve. We only grow — never shrink —
@@ -295,6 +300,8 @@ defmodule Bland.Renderer do
       %Histogram{hatch: h} -> [h]
       %Polygon{hatch: h} -> [h]
       %BoxPlot{hatch: h} -> [h]
+      %Vspan{hatch: h} -> [h]
+      %Hspan{hatch: h} -> [h]
       %Heatmap{ramp: r} when is_list(r) -> r
       %Heatmap{ramp: nil} -> Bland.Heatmap.default_ramp()
       _ -> []
@@ -399,6 +406,11 @@ defmodule Bland.Renderer do
   defp tick_values(:linear, domain, _series), do: Ticks.nice(domain, 6)
   defp tick_values(:log, domain, _series), do: Ticks.log_nice(domain, 10)
 
+  defp tick_values(:date, domain, _series) do
+    {vals, _fmt} = Bland.DateTime.nice_ticks(domain, 6)
+    vals
+  end
+
   # --- series ---------------------------------------------------------------
 
   defp series_layer(ctx) do
@@ -420,12 +432,20 @@ defmodule Bland.Renderer do
     clip_def =
       Svg.defs([~s|<clipPath id="#{clip_id}">|, clip_shape, ~s|</clipPath>|])
 
-    drawn =
+    # Spans render first so they sit behind every data series. We preserve
+    # their original index in the series list so per-series defaults
+    # (pattern cycle, dash cycle) stay stable.
+    {spans, others} =
       ctx.fig.series
       |> Enum.with_index()
-      |> Enum.map(fn {s, i} -> draw_series(s, i, ctx) end)
+      |> Enum.split_with(fn {s, _i} ->
+        match?(%Vspan{}, s) or match?(%Hspan{}, s)
+      end)
 
-    [clip_def, Svg.g(["clip-path": "url(##{clip_id})"], drawn)]
+    drawn_spans = Enum.map(spans, fn {s, i} -> draw_series(s, i, ctx) end)
+    drawn_others = Enum.map(others, fn {s, i} -> draw_series(s, i, ctx) end)
+
+    [clip_def, Svg.g(["clip-path": "url(##{clip_id})"], [drawn_spans, drawn_others])]
   end
 
   defp draw_series(%Line{} = l, index, ctx) do
@@ -695,6 +715,22 @@ defmodule Bland.Renderer do
     )
   end
 
+  defp draw_series(%Vspan{} = v, _index, ctx) do
+    {_, py, _, ph} = ctx.plot_rect
+    x1 = Scale.project(ctx.xscale, v.x1)
+    x2 = Scale.project(ctx.xscale, v.x2)
+
+    span_rect(min(x1, x2), py, abs(x2 - x1), ph, v, ctx)
+  end
+
+  defp draw_series(%Hspan{} = h, _index, ctx) do
+    {px, _, pw, _} = ctx.plot_rect
+    y1 = Scale.project(ctx.yscale, h.y1)
+    y2 = Scale.project(ctx.yscale, h.y2)
+
+    span_rect(px, min(y1, y2), pw, abs(y2 - y1), h, ctx)
+  end
+
   defp draw_series(%ErrorBar{} = e, _index, ctx) do
     sw = e.stroke_width || ctx.theme.series_stroke_width
     cap = e.cap_width
@@ -935,6 +971,30 @@ defmodule Bland.Renderer do
     end)
   end
 
+  defp span_rect(x, y, w, height, span, ctx) do
+    fill =
+      case span.hatch do
+        nil -> "none"
+        :none -> "none"
+        h -> Patterns.fill(h)
+      end
+
+    stroke_attrs =
+      if span.stroke do
+        [
+          stroke: ctx.theme.foreground,
+          "stroke-width": span.stroke_width || ctx.theme.series_stroke_width,
+          "stroke-dasharray": Bland.Strokes.dasharray(span.stroke)
+        ]
+      else
+        [stroke: "none"]
+      end
+
+    Svg.rect(x, y, w, height,
+      [fill: fill, "fill-opacity": span.alpha] ++ stroke_attrs
+    )
+  end
+
   # Helper: project a data-space point to pixel space, going through the
   # figure projection (mercator/polar/etc.) first.
   defp project_px(ctx, {x, y}) do
@@ -1002,6 +1062,11 @@ defmodule Bland.Renderer do
           vals = nice_geo_ticks(geo_xlim, 7)
           {vals, fn lon -> elem(project_xy({lon, 0}, proj), 0) end, &format_lon_deg/1}
 
+        f.xscale == :date ->
+          {vals, default_fmt} = Bland.DateTime.nice_ticks(xs.domain, 6)
+          fmt = f.xtick_format || default_fmt
+          {vals, fn v -> v end, fn v -> Bland.DateTime.format(v, fmt) end}
+
         true ->
           {tick_values(f.xscale, xs.domain, f.series), fn v -> v end, &Ticks.format/1}
       end
@@ -1040,11 +1105,18 @@ defmodule Bland.Renderer do
   defp y_ticks(%{fig: f, theme: t, plot_rect: {px, _py, _, _ph}, yscale: ys,
                  projection: proj, geo_ylim: geo_ylim}) do
     {values, project_val, label_for} =
-      if proj != :none and not is_nil(geo_ylim) do
-        vals = nice_geo_ticks(geo_ylim, 6)
-        {vals, fn lat -> elem(project_xy({0, lat}, proj), 1) end, &format_lat_deg/1}
-      else
-        {tick_values(f.yscale, ys.domain, f.series), fn v -> v end, &Ticks.format/1}
+      cond do
+        proj != :none and not is_nil(geo_ylim) ->
+          vals = nice_geo_ticks(geo_ylim, 6)
+          {vals, fn lat -> elem(project_xy({0, lat}, proj), 1) end, &format_lat_deg/1}
+
+        f.yscale == :date ->
+          {vals, default_fmt} = Bland.DateTime.nice_ticks(ys.domain, 6)
+          fmt = f.ytick_format || default_fmt
+          {vals, fn v -> v end, fn v -> Bland.DateTime.format(v, fmt) end}
+
+        true ->
+          {tick_values(f.yscale, ys.domain, f.series), fn v -> v end, &Ticks.format/1}
       end
 
     len = t.tick_length
@@ -1317,6 +1389,18 @@ defmodule Bland.Renderer do
 
   defp legend_entry(%Quiver{label: label, stroke: stroke}, _) do
     [{label, :line, %{stroke: stroke || :solid, marker: nil}}]
+  end
+
+  defp legend_entry(%Vspan{label: nil}, _), do: []
+
+  defp legend_entry(%Vspan{label: label, hatch: hatch}, _) do
+    [{label, :bar, %{hatch: hatch || :dots_sparse}}]
+  end
+
+  defp legend_entry(%Hspan{label: nil}, _), do: []
+
+  defp legend_entry(%Hspan{label: label, hatch: hatch}, _) do
+    [{label, :bar, %{hatch: hatch || :dots_sparse}}]
   end
 
   defp legend_entry(_, _), do: []
