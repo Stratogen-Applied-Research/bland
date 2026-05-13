@@ -1,7 +1,7 @@
 defmodule Bland.MixProject do
   use Mix.Project
 
-  @version "0.4.0"
+  @version "0.5.0"
   @source_url "https://github.com/Stratogen-Applied-Research/bland"
 
   def project do
@@ -34,7 +34,11 @@ defmodule Bland.MixProject do
       # Used only by mix bland.basemaps.compile to parse Natural Earth
       # GeoJSON into the vendored Elixir data modules. The compiled
       # output has no JSON at runtime.
-      {:jason, "~> 1.4", only: :dev, runtime: false}
+      {:jason, "~> 1.4", only: :dev, runtime: false},
+      # Optional. Enables `Bland.Phoenix.Component.bland_figure/1` —
+      # the inline-SVG component for LiveView dashboards. Pulled in by
+      # consumers only when they explicitly add it to their own deps.
+      {:phoenix_live_view, "~> 1.0", optional: true}
     ]
   end
 
@@ -60,6 +64,7 @@ defmodule Bland.MixProject do
         "pages/patterns_and_hatching.md",
         "pages/styling_and_themes.md",
         "pages/paper_output.md",
+        "pages/phoenix_dashboards.md",
         "notebooks/showcase.livemd"
       ],
       # Copies pages/assets/ → doc/assets/ so `![](assets/foo.svg)` in

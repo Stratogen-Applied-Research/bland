@@ -561,6 +561,57 @@ defmodule BlandTest do
     end
   end
 
+  describe "Bland.Phoenix.Component" do
+    import Phoenix.LiveViewTest
+
+    test "renders a figure as inline SVG inside a div" do
+      fig =
+        Bland.figure(title: "Live")
+        |> Bland.line([0, 1, 2], [0, 1, 4])
+
+      html =
+        render_component(&Bland.Phoenix.Component.bland_figure/1, figure: fig)
+
+      assert html =~ ~r|<div[^>]*>|
+      assert html =~ "<svg"
+      assert html =~ "</svg>"
+      assert html =~ "<polyline"
+      # XML prolog must be stripped — it's invalid inside HTML
+      refute html =~ "<?xml"
+    end
+
+    test "accepts a pre-rendered :svg binary (Bland.grid output)" do
+      a = Bland.figure(size: {300, 200}) |> Bland.line([0, 1], [0, 1])
+      b = Bland.figure(size: {300, 200}) |> Bland.line([0, 1], [1, 0])
+      svg = Bland.grid([a, b], columns: 2)
+
+      html =
+        render_component(&Bland.Phoenix.Component.bland_figure/1, svg: svg)
+
+      assert html =~ "<svg"
+      refute html =~ "<?xml"
+    end
+
+    test ":class and :style propagate to the wrapping div" do
+      fig = Bland.figure() |> Bland.line([0, 1], [0, 1])
+
+      html =
+        render_component(&Bland.Phoenix.Component.bland_figure/1,
+          figure: fig,
+          class: "dashboard-plot",
+          style: "max-width: 100%"
+        )
+
+      assert html =~ ~s|class="dashboard-plot"|
+      assert html =~ ~s|style="max-width: 100%"|
+    end
+
+    test "no figure or svg renders empty wrapping div" do
+      html = render_component(&Bland.Phoenix.Component.bland_figure/1, [])
+      assert html =~ ~r|<div[^>]*>\s*</div>|
+    end
+  end
+
   describe "Bland.Kino" do
     test "frame/0 raises a useful message when :kino is not loaded" do
       # Kino is a Livebook dep; not present in `mix test`.
